@@ -13,7 +13,7 @@ export default function Home() {
       <div className="absolute top-5 left-6">
         <img src="/jobnimbus-logo.png" alt="JobNimbus" className="h-8 w-auto" />
       </div>
-      <h1 className="text-2xl font-bold text-white mb-2">Photo Annotator</h1>
+      <h1 className="text-2xl font-bold text-white mb-2">Photo Markup</h1>
       <p className="text-zinc-400 mb-10 text-center">Pick a layout to test</p>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl w-full">
         {versions.map(({ href, title, subtitle, desc }) => (
