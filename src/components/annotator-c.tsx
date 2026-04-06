@@ -52,7 +52,7 @@ export default function AnnotatorC({ imageUrl, imageName, initialState, onBack }
               style={{ backgroundColor: value }} />
           ))}
           <div className="h-px w-7 bg-zinc-700" />
-          <button onClick={a.toggleFill}
+          <button onClick={a.toggleColorMode}
             className={`w-10 h-10 rounded-xl flex items-center justify-center ${a.isFilled ? 'bg-zinc-700' : 'hover:bg-zinc-800'}`}>
             <div className="w-5 h-5 rounded-sm border-2" style={{ borderColor: a.activeColor, backgroundColor: a.isFilled ? hexToRgba(a.activeColor, 0.35) : 'transparent' }} />
           </button>

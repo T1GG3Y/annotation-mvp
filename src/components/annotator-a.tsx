@@ -42,7 +42,7 @@ export default function AnnotatorA({ imageUrl, imageName, initialState, onBack }
         ))}
         <div className="h-8 w-px bg-zinc-700 mx-2" />
 
-        <button onClick={a.toggleFill} title={a.isFilled ? 'Hollow' : 'Filled'}
+        <button onClick={a.toggleColorMode} title={a.colorMode === 'fill' ? 'Stroke only' : 'Fill mode'}
           className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${a.isFilled ? 'bg-zinc-700' : 'hover:bg-zinc-800'}`}>
           <div className="w-5 h-5 rounded-sm border-2" style={{ borderColor: a.activeColor, backgroundColor: a.isFilled ? hexToRgba(a.activeColor, 0.35) : 'transparent' }} />
         </button>
