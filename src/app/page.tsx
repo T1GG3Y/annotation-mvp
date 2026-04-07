@@ -5,6 +5,8 @@ const versions = [
   { href: '/b', title: 'Version B', subtitle: 'Left Sidebar', desc: 'Vertical sidebar with labeled tool buttons. Spacious layout with grouped sections.' },
   { href: '/c', title: 'Version C', subtitle: 'Floating Controls', desc: 'Minimal floating panels. Tools at bottom, colors on the right. Maximum canvas space.' },
   { href: '/d', title: 'Version D', subtitle: 'Refined Controls', desc: 'Auto-select after draw, rounded rects, fill color control, font sizing, bar-style stroke icons, and fixed legend labels.' },
+  { href: '/e', title: 'Version E', subtitle: 'Damage Visibility', desc: 'All Version B features plus a Damage Visibility slider that enhances local contrast, sharpness, and shadow detail to reveal damage in photos.' },
+  { href: '/f', title: 'Version F', subtitle: 'Mobile', desc: 'Portrait-optimized for phones and tablets. Bottom toolbar with touch-sized controls, keyboard-aware canvas, and Damage Visibility slider.' },
 ]
 
 export default function Home() {

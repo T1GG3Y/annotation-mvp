@@ -8,17 +8,19 @@ import * as fabric from 'fabric'
 // ---------------------------------------------------------------------------
 
 export type Tool = 'select' | 'arrow' | 'line' | 'circle' | 'rectangle' | 'text'
-export type ColorMode = 'stroke' | 'fill'
+export type ColorMode = 'stroke' | 'fill' | 'text'
 export type SelectedType = 'text' | 'shape' | 'none'
-export type AnnotationColor = '#EF4444' | '#FACC15' | '#69BE28' | '#3B82F6' | '#000000' | '#FFFFFF'
+export type AnnotationColor = '#EF4444' | '#FACC15' | '#0ADD08' | '#3B82F6' | '#EC4899' | '#FFFFFF' | '#000000'
 
+// 7 colors — rendered as 2 rows of 4 with a null button as the 8th cell
 export const COLORS: { value: AnnotationColor; label: string }[] = [
-  { value: '#000000', label: 'Black' },
-  { value: '#FFFFFF', label: 'White' },
   { value: '#EF4444', label: 'Red' },
   { value: '#FACC15', label: 'Yellow' },
-  { value: '#69BE28', label: 'Green' },
+  { value: '#0ADD08', label: 'Green' },
   { value: '#3B82F6', label: 'Blue' },
+  { value: '#EC4899', label: 'Pink' },
+  { value: '#FFFFFF', label: 'White' },
+  { value: '#000000', label: 'Black' },
 ]
 
 export const STROKE_WIDTHS = [3, 6, 10] as const
@@ -34,7 +36,7 @@ function makeShadow() {
   return new fabric.Shadow({ color: 'rgba(0,0,0,0.92)', blur: 20, offsetX: 4, offsetY: 4 })
 }
 
-export function hexToRgba(hex: string, alpha: number): string {
+export function hexToRgba(hex: string | AnnotationColor, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
@@ -140,6 +142,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const [colorMode, setColorMode] = useState<ColorMode>('stroke')
   const [activeColor, setActiveColor] = useState<AnnotationColor>('#EF4444')
   const [fillColor, setFillColor] = useState<AnnotationColor>('#000000')
+  const [activeTextColor, setActiveTextColor] = useState<AnnotationColor>('#FFFFFF')
   const [strokeOpacity, setStrokeOpacity] = useState(1.0)
   const [fillOpacity, setFillOpacity] = useState(0.85)
   const [strokeWidth, setStrokeWidth] = useState(DEFAULT_STROKE)
@@ -149,11 +152,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [hasSelection, setHasSelection] = useState(false)
+  const [legendPickerColor, setLegendPickerColor] = useState<string | null>(null)
 
   const activeToolRef = useRef<Tool>('select')
   const colorModeRef = useRef<ColorMode>('stroke')
   const activeColorRef = useRef<AnnotationColor>('#EF4444')
   const fillColorRef = useRef<AnnotationColor>('#000000')
+  const activeTextColorRef = useRef<AnnotationColor>('#FFFFFF')
   const strokeOpacityRef = useRef(1.0)
   const fillOpacityRef = useRef(0.85)
   const strokeWidthRef = useRef(DEFAULT_STROKE)
@@ -167,6 +172,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const loadingHistoryRef = useRef(false)
   const onKeyRef = useRef<((e: KeyboardEvent) => void) | null>(null)
   const legendLabelsRef = useRef<Record<string, string>>({})
+  const copiedRef = useRef<fabric.FabricObject | null>(null)
 
   // Stable ref so changeColor (defined before maybeUpdateLegend) can call it
   const maybeUpdateLegendRef = useRef<() => void>(() => {})
@@ -217,6 +223,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
   // -- Color mode --
 
+  const setColorModeAction = useCallback((next: ColorMode) => {
+    setColorMode(next); colorModeRef.current = next
+  }, [])
+
   const toggleColorMode = useCallback(() => {
     const next: ColorMode = colorModeRef.current === 'stroke' ? 'fill' : 'stroke'
     setColorMode(next); colorModeRef.current = next
@@ -229,20 +239,24 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const mode = colorModeRef.current
     const obj = c?.getActiveObject()
 
+    if (mode === 'text') {
+      setActiveTextColor(color); activeTextColorRef.current = color
+      if (obj && (obj.type === 'i-text' || obj.type === 'textbox')) {
+        obj.set({ fill: color }); obj.dirty = true
+        c!.renderAll(); saveHistory()
+      }
+      return
+    }
+
     if (mode === 'stroke') {
       setActiveColor(color); activeColorRef.current = color
       if (obj) {
         if (obj.type === 'i-text' || obj.type === 'textbox') {
-          // Stroke on text = border around the box, NOT on text characters
-          ;(obj as any)._boxStroke = hexToRgba(color, strokeOpacityRef.current)
-          ;(obj as any)._boxStrokeWidth = strokeWidthRef.current
-          obj.set({ stroke: '', strokeWidth: 0 })
-          applyBoxStrokeRenderer(obj as any)
-          obj.dirty = true
+          // Text stroke is not supported — silently ignore (UI should hide stroke tab for text)
         } else {
           obj.set({ stroke: hexToRgba(color, strokeOpacityRef.current) })
+          c!.renderAll(); saveHistory()
         }
-        c!.renderAll(); saveHistory()
       }
       // Rebuild legend if visible
       maybeUpdateLegendRef.current()
@@ -275,6 +289,66 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     c.renderAll(); saveHistory()
   }, [saveHistory])
 
+  const clearStroke = useCallback(() => {
+    const c = fabricRef.current; if (!c) return
+    const obj = c.getActiveObject(); if (!obj) return
+    // Text objects don't have stroke — only shapes
+    if (obj.type !== 'i-text' && obj.type !== 'textbox') {
+      obj.set({ stroke: '', strokeWidth: 0 })
+      c.renderAll(); saveHistory()
+    }
+  }, [saveHistory])
+
+  // -- Legend shape placement --
+
+  const placeLegendShape = useCallback((tool: 'circle' | 'rectangle', color: string) => {
+    const c = fabricRef.current; if (!c) return
+    const cx = c.width! / 2, cy = c.height! / 2
+    const sw = strokeWidthRef.current
+    const strokeColor = hexToRgba(color, strokeOpacityRef.current)
+    let shape: fabric.FabricObject
+    if (tool === 'circle') {
+      shape = new fabric.Ellipse({ left: cx, top: cy, rx: 40, ry: 40, fill: 'transparent', stroke: strokeColor, strokeWidth: sw, strokeUniform: true, shadow: makeShadow(), originX: 'center', originY: 'center' })
+    } else {
+      shape = new fabric.Rect({ left: cx - 50, top: cy - 35, width: 100, height: 70, fill: 'transparent', stroke: strokeColor, strokeWidth: sw, strokeUniform: true, shadow: makeShadow(), rx: 8, ry: 8 })
+    }
+    c.add(shape); c.setActiveObject(shape); shape.setCoords(); c.renderAll(); saveHistory()
+    applySelectMode(c, setActiveTool, activeToolRef)
+    maybeUpdateLegendRef.current()
+  }, [saveHistory])
+
+  // -- Copy / Paste / Duplicate --
+
+  const copySelected = useCallback(() => {
+    const c = fabricRef.current; if (!c) return
+    const obj = c.getActiveObject(); if (!obj) return
+    ;(obj as any).clone().then((cloned: fabric.FabricObject) => { copiedRef.current = cloned })
+  }, [])
+
+  const pasteSelected = useCallback(() => {
+    const c = fabricRef.current; if (!c || !copiedRef.current) return
+    ;(copiedRef.current as any).clone().then((cloned: fabric.FabricObject) => {
+      cloned.set({ left: (cloned.left ?? 0) + 20, top: (cloned.top ?? 0) + 20 })
+      c.discardActiveObject()
+      c.add(cloned); c.setActiveObject(cloned); cloned.setCoords(); c.renderAll(); saveHistory()
+      // Re-clone so paste again works
+      ;(copiedRef.current as any).clone().then((next: fabric.FabricObject) => {
+        next.set({ left: (next.left ?? 0) + 20, top: (next.top ?? 0) + 20 })
+        copiedRef.current = next
+      })
+    })
+  }, [saveHistory])
+
+  const duplicateSelected = useCallback(() => {
+    const c = fabricRef.current; if (!c) return
+    const obj = c.getActiveObject(); if (!obj) return
+    ;(obj as any).clone().then((cloned: fabric.FabricObject) => {
+      cloned.set({ left: (cloned.left ?? 0) + 20, top: (cloned.top ?? 0) + 20 })
+      c.discardActiveObject()
+      c.add(cloned); c.setActiveObject(cloned); cloned.setCoords(); c.renderAll(); saveHistory()
+    })
+  }, [saveHistory])
+
   // -- Unified opacity (stroke or fill depending on mode) --
 
   const changeOpacity = useCallback((opacity: number) => {
@@ -284,17 +358,12 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
     if (mode === 'stroke') {
       setStrokeOpacity(opacity); strokeOpacityRef.current = opacity
-      if (obj) {
-        if (obj.type === 'i-text' || obj.type === 'textbox') {
-          if ((obj as any)._boxStroke) {
-            ;(obj as any)._boxStroke = hexToRgba(activeColorRef.current, opacity)
-            obj.dirty = true
-          }
-        } else {
-          obj.set({ stroke: hexToRgba(activeColorRef.current, opacity) })
-        }
+      if (obj && obj.type !== 'i-text' && obj.type !== 'textbox') {
+        obj.set({ stroke: hexToRgba(activeColorRef.current, opacity) })
         c!.renderAll(); saveHistory()
       }
+    } else if (mode === 'text') {
+      // Opacity not applicable to text character color
     } else {
       setFillOpacity(opacity); fillOpacityRef.current = opacity
       if (obj) {
@@ -310,19 +379,15 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     }
   }, [saveHistory])
 
-  // -- Stroke width (applies to all, box stroke for text) --
+  // -- Stroke width (shapes only, not text) --
 
   const changeStrokeWidth = useCallback((w: number) => {
     setStrokeWidth(w); strokeWidthRef.current = w
     const c = fabricRef.current; if (!c) return
     const obj = c.getActiveObject(); if (!obj) return
-    if (obj.type === 'i-text' || obj.type === 'textbox') {
-      ;(obj as any)._boxStrokeWidth = w
-      obj.set({ strokeWidth: 0 }); obj.dirty = true
-    } else {
-      obj.set({ strokeWidth: w })
+    if (obj.type !== 'i-text' && obj.type !== 'textbox') {
+      obj.set({ strokeWidth: w }); c.renderAll(); saveHistory()
     }
-    c.renderAll(); saveHistory()
   }, [saveHistory])
 
   // -- Font size --
@@ -342,7 +407,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const deleteSelected = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     const objs = c.getActiveObjects(); if (!objs.length) return
-    objs.forEach((o) => c.remove(o)); c.discardActiveObject(); c.renderAll(); saveHistory()
+    // If the legend background is selected, delete the entire legend
+    const deletingLegendBg = objs.some((o: any) => o.isLegendBg)
+    if (deletingLegendBg) {
+      c.getObjects().filter((o: any) => o.isLegend).forEach((o) => c.remove(o))
+    } else {
+      objs.forEach((o) => c.remove(o))
+    }
+    c.discardActiveObject(); c.renderAll(); saveHistory()
     maybeUpdateLegendRef.current()
   }, [saveHistory])
 
@@ -403,8 +475,9 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     ;(title as any).isLegend = true; c.add(title)
     colors.forEach((color, i) => {
       const rowY = y + pad + titleH + i * rowH
-      const sw = new fabric.Rect({ left: x + pad, top: rowY, width: swatchSz, height: swatchSz, fill: color, rx: 3, ry: 3, selectable: false, evented: false })
-      ;(sw as any).isLegend = true; (sw as any).legendColor = color; c.add(sw)
+      // Swatch is evented+selectable so user can click it to pick the color for shape placement
+      const sw = new fabric.Rect({ left: x + pad, top: rowY, width: swatchSz, height: swatchSz, fill: color, rx: 3, ry: 3, selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
+      ;(sw as any).isLegend = true; (sw as any).isLegendSwatch = true; (sw as any).legendColor = color; c.add(sw)
       const label = new fabric.IText(legendLabelsRef.current[color] || 'Edit', {
         left: x + pad + swatchSz + 10, top: rowY - 1,
         fontFamily: 'Arial, sans-serif', fontSize: 15, fill: '#FFFFFF', editable: true,
@@ -479,8 +552,24 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       const syncSelectedType = () => {
         const obj = canvas.getActiveObject()
         if (!obj) { setSelectedType('none'); return }
-        if (obj.type === 'i-text' || obj.type === 'textbox') { setSelectedType('text'); return }
+        if (obj.type === 'i-text' || obj.type === 'textbox') {
+          setSelectedType('text')
+          // Default to text color mode when text is selected
+          setColorMode('text'); colorModeRef.current = 'text'
+          // Sync text color state
+          const currentFill = (obj as any).fill
+          if (currentFill && typeof currentFill === 'string') {
+            const hex = extractHex(currentFill) as AnnotationColor
+            const match = COLORS.find(c => c.value === hex)
+            if (match) { setActiveTextColor(match.value); activeTextColorRef.current = match.value }
+          }
+          return
+        }
         setSelectedType('shape')
+        // When shape selected, stay in stroke/fill mode (don't switch to 'text')
+        if (colorModeRef.current === 'text') {
+          setColorMode('stroke'); colorModeRef.current = 'stroke'
+        }
       }
 
       // Mouse
@@ -571,9 +660,28 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         shapeRef.current = null; canvas.renderAll()
       })
 
-      canvas.on('selection:created', () => { setHasSelection(true); syncSelectedType() })
-      canvas.on('selection:updated', () => { setHasSelection(true); syncSelectedType() })
-      canvas.on('selection:cleared', () => { setHasSelection(false); setSelectedType('none') })
+      canvas.on('selection:created', (opt: any) => {
+        setHasSelection(true); syncSelectedType()
+        // Check if a legend swatch was clicked
+        const obj = opt.selected?.[0] as any
+        if (obj?.isLegendSwatch && obj?.legendColor) {
+          setLegendPickerColor(obj.legendColor)
+          canvas.discardActiveObject(); canvas.renderAll()
+        } else {
+          setLegendPickerColor(null)
+        }
+      })
+      canvas.on('selection:updated', (opt: any) => {
+        setHasSelection(true); syncSelectedType()
+        const obj = opt.selected?.[0] as any
+        if (obj?.isLegendSwatch && obj?.legendColor) {
+          setLegendPickerColor(obj.legendColor)
+          canvas.discardActiveObject(); canvas.renderAll()
+        } else {
+          setLegendPickerColor(null)
+        }
+      })
+      canvas.on('selection:cleared', () => { setHasSelection(false); setSelectedType('none'); setLegendPickerColor(null) })
       canvas.on('object:modified', () => saveHistory())
 
       let legendDragStart: { x: number; y: number } | null = null
@@ -605,7 +713,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         const isEditing = active && (active.type === 'i-text' || active.type === 'textbox') && (active as fabric.IText).isEditing
         if (e.metaKey || e.ctrlKey) {
           if (e.key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return }
-          if (e.key === 'a' && !isEditing) { e.preventDefault(); const objs = canvas.getObjects(); if (objs.length) { canvas.setActiveObject(new fabric.ActiveSelection(objs, { canvas })); canvas.renderAll() } return }
+          if (e.key === 'a' && !isEditing) { e.preventDefault(); const objs = canvas.getObjects().filter((o: any) => !o.isLegend); if (objs.length) { canvas.setActiveObject(new fabric.ActiveSelection(objs, { canvas })); canvas.renderAll() } return }
+          if (e.key === 'c' && !isEditing) { e.preventDefault(); copySelected(); return }
+          if (e.key === 'v' && !isEditing) { e.preventDefault(); pasteSelected(); return }
+          if (e.key === 'd' && !isEditing) { e.preventDefault(); duplicateSelected(); return }
           return
         }
         switch (e.key) {
@@ -634,9 +745,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   }, [imageUrl, initialState])
 
   return {
-    activeTool, colorMode, activeColor, fillColor, strokeOpacity, fillOpacity, strokeWidth,
-    isFilled, fontSize, selectedType, canUndo, canRedo, hasSelection,
-    changeTool, toggleColorMode, changeColor, clearFill, changeOpacity, changeStrokeWidth, changeFontSize,
+    activeTool, colorMode, activeColor, fillColor, activeTextColor, strokeOpacity, fillOpacity, strokeWidth,
+    isFilled, fontSize, selectedType, canUndo, canRedo, hasSelection, legendPickerColor,
+    changeTool, setColorModeAction, toggleColorMode, changeColor, clearFill, clearStroke,
+    changeOpacity, changeStrokeWidth, changeFontSize,
+    copySelected, pasteSelected, duplicateSelected,
+    placeLegendShape,
     undo, redo, deleteSelected, downloadImage, saveEditable, createLegend,
+    fabricRef,
   }
 }

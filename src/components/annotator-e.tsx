@@ -1,8 +1,10 @@
 'use client'
 
-import { useRef } from 'react'
-import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown } from 'lucide-react'
+import { useRef, useState, useEffect, useCallback } from 'react'
+import * as fabric from 'fabric'
+import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown, RotateCcw } from 'lucide-react'
 import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@/hooks/use-annotator'
+import { applyDamageVisibility } from '@/lib/image-enhance'
 
 interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void }
 
@@ -37,17 +39,79 @@ function NoColorIcon() {
   )
 }
 
-export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }: Props) {
+export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }: Props) {
   const canvasElRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const a = useAnnotator({ imageUrl, imageName, initialState, canvasElRef, containerRef })
 
+  const [damageVisibility, setDamageVisibility] = useState(0)
+  const originalImgRef = useRef<HTMLImageElement | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const applyingRef = useRef(false)
+  const [showResetConfirm, setShowResetConfirm] = useState(false)
+
   const isTextMode = a.colorMode === 'text'
   const isStrokeMode = a.colorMode === 'stroke'
   const isFillMode = a.colorMode === 'fill'
-
   const activeOpacity = isStrokeMode ? a.strokeOpacity : a.fillOpacity
   const activeSelectedColor = isTextMode ? a.activeTextColor : isStrokeMode ? a.activeColor : a.fillColor
+
+  useEffect(() => {
+    if (!imageUrl || imageUrl === '__saved__') return
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => { originalImgRef.current = img }
+    img.src = imageUrl
+  }, [imageUrl])
+
+  const applyEnhancement = useCallback((strength: number) => {
+    const canvas = a.fabricRef.current
+    const origImg = originalImgRef.current
+    if (!canvas || !origImg || applyingRef.current) return
+    applyingRef.current = true
+
+    const bg = canvas.backgroundImage as fabric.FabricImage | undefined
+    const scaleX = bg?.scaleX ?? 1
+    const scaleY = bg?.scaleY ?? 1
+    const left = bg?.left ?? canvas.width! / 2
+    const top = bg?.top ?? canvas.height! / 2
+
+    const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
+    if (!loader) { applyingRef.current = false; return }
+
+    if (strength === 0) {
+      loader.call((fabric as any).FabricImage ?? (fabric as any).Image, imageUrl, { crossOrigin: 'anonymous' })
+        .then((img: any) => {
+          img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top })
+          canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false
+        }).catch(() => { applyingRef.current = false })
+      return
+    }
+
+    try {
+      const enhanced = applyDamageVisibility(origImg, strength / 100)
+      const dataUrl = enhanced.toDataURL('image/jpeg', 0.92)
+      loader.call((fabric as any).FabricImage ?? (fabric as any).Image, dataUrl, { crossOrigin: 'anonymous' })
+        .then((img: any) => {
+          img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top })
+          canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false
+        }).catch(() => { applyingRef.current = false })
+    } catch { applyingRef.current = false }
+  }, [a.fabricRef, imageUrl])
+
+  const handleDamageSlider = useCallback((value: number) => {
+    setDamageVisibility(value)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => applyEnhancement(value), 120)
+  }, [applyEnhancement])
+
+  const handleResetConfirmed = useCallback(() => {
+    const canvas = a.fabricRef.current; if (!canvas) return
+    canvas.getObjects().forEach((o) => canvas.remove(o))
+    canvas.discardActiveObject(); canvas.renderAll()
+    canvas.fire('object:modified' as any)
+    setShowResetConfirm(false)
+  }, [a.fabricRef])
 
   const sectionLabel = (text: string) => (
     <div className="px-3 pt-5 pb-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">{text}</div>
@@ -55,13 +119,11 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
 
   return (
     <div className="h-screen flex bg-zinc-950">
-      {/* Left sidebar */}
       <div className="w-52 flex flex-col bg-zinc-900 border-r border-zinc-800 select-none overflow-y-auto">
         <button onClick={onBack} className="flex items-center gap-2 px-4 py-4 text-zinc-400 hover:text-white hover:bg-zinc-800 text-sm font-medium border-b border-zinc-800">
           <ArrowLeft size={18} /> Back
         </button>
 
-        {/* Tool grid */}
         {sectionLabel('Tools')}
         <div className="px-3 flex flex-col gap-1">
           {TOOL_GRID.map((row, ri) => (
@@ -78,10 +140,8 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           ))}
         </div>
 
-        {/* Color — stroke/fill/text tabs + 2×4 swatch grid */}
         {sectionLabel('Color')}
         <div className="px-3">
-          {/* Tab row: shows Stroke+Fill for shapes, Text+Fill for text */}
           <div className="flex rounded-lg overflow-hidden border border-zinc-700 mb-3">
             {a.selectedType === 'text' ? (
               <>
@@ -108,14 +168,12 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
             )}
           </div>
 
-          {/* 2×4 color grid: 7 colors + null */}
           <div className="grid grid-cols-4 gap-1.5">
             {COLORS.map(({ value, label }) => (
               <button key={value} onClick={() => a.changeColor(value)} title={label}
                 className={`w-8 h-8 rounded-full border-2 transition-all ${activeSelectedColor === value ? 'border-blue-500 scale-110' : 'border-zinc-600 hover:border-zinc-400'}`}
                 style={{ backgroundColor: value }} />
             ))}
-            {/* Null cell — no-stroke for shapes in stroke mode, no-fill otherwise, hidden in text mode */}
             {!isTextMode && (
               <button
                 onClick={isStrokeMode ? a.clearStroke : a.clearFill}
@@ -127,7 +185,6 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
             )}
           </div>
 
-          {/* Opacity — only for stroke/fill, not text */}
           {!isTextMode && (
             <div className="mt-3">
               <div className="flex items-center justify-between mb-1">
@@ -141,7 +198,6 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           )}
         </div>
 
-        {/* Border — shapes only */}
         {a.selectedType === 'shape' && (
           <>
             {sectionLabel('Border')}
@@ -156,7 +212,6 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           </>
         )}
 
-        {/* Font size — text only */}
         {a.selectedType === 'text' && (
           <>
             {sectionLabel('Font Size')}
@@ -173,7 +228,6 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           </>
         )}
 
-        {/* Legend shape picker — appears when a legend swatch is clicked */}
         {a.legendPickerColor && (
           <>
             {sectionLabel('Place Shape')}
@@ -191,9 +245,22 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           </>
         )}
 
+        {sectionLabel('Damage Visibility')}
+        <div className="px-3">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Enhance</span>
+            <span className="text-[11px] text-zinc-400">{damageVisibility === 0 ? 'Off' : `${damageVisibility}%`}</span>
+          </div>
+          <input type="range" min={0} max={100} value={damageVisibility}
+            onChange={(e) => handleDamageSlider(parseInt(e.target.value))}
+            className="w-full h-1.5 rounded-full appearance-none cursor-pointer accent-orange-500 bg-zinc-700" />
+          <p className="mt-1.5 text-[10px] text-zinc-600 leading-tight">
+            Boosts local contrast, sharpness &amp; shadow detail to reveal damage
+          </p>
+        </div>
+
         <div className="flex-1" />
 
-        {/* Actions */}
         <div className="px-2 pb-3 flex flex-col gap-1.5">
           <div className="flex gap-1">
             <button onClick={a.undo} disabled={!a.canUndo} className="flex-1 p-3 rounded-lg text-zinc-400 hover:bg-zinc-800 disabled:opacity-25"><Undo2 size={20} className="mx-auto" /></button>
@@ -203,12 +270,36 @@ export default function AnnotatorB({ imageUrl, imageName, initialState, onBack }
           <button onClick={a.createLegend} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-zinc-400 hover:bg-zinc-800 hover:text-white text-sm font-medium">
             <List size={20} /> Legend
           </button>
+          <button onClick={() => setShowResetConfirm(true)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-zinc-400 hover:bg-zinc-800 hover:text-red-400 text-sm font-medium">
+            <RotateCcw size={18} /> Reset Photo
+          </button>
           <button onClick={a.saveEditable} className="w-full flex items-center justify-center gap-2 py-3 bg-zinc-700 hover:bg-zinc-600 text-white rounded-xl text-sm font-medium"><Save size={18} /> Save</button>
           <button onClick={a.downloadImage} className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium"><Download size={18} /> Download</button>
         </div>
       </div>
 
       <div ref={containerRef} className="flex-1 overflow-hidden"><canvas ref={canvasElRef} /></div>
+
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-80 shadow-2xl">
+            <h2 className="text-white font-semibold text-base mb-2">Delete all markings?</h2>
+            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
+              Are you sure you want to delete all markings? You can undo this with the undo button.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setShowResetConfirm(false)}
+                className="flex-1 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-white text-sm font-medium transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleResetConfirmed}
+                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">
+                Delete All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
