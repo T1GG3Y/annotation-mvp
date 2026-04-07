@@ -2,19 +2,19 @@
 
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as fabric from 'fabric'
-import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown, RotateCcw } from 'lucide-react'
+import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, ArrowLeft, AArrowUp, AArrowDown, Pen, PaintBucket, Eye, List, RotateCcw, MoreHorizontal } from 'lucide-react'
 import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@/hooks/use-annotator'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
 interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void }
 
-const TOOLS: { tool: Tool; Icon: typeof MousePointer2; label: string; key: string }[] = [
-  { tool: 'circle', Icon: Circle, label: 'Circle', key: 'C' },
-  { tool: 'rectangle', Icon: Square, label: 'Rect', key: 'R' },
-  { tool: 'arrow', Icon: ArrowUpRight, label: 'Arrow', key: 'A' },
-  { tool: 'line', Icon: Minus, label: 'Line', key: 'L' },
-  { tool: 'text', Icon: Type, label: 'Text', key: 'T' },
-  { tool: 'select', Icon: MousePointer2, label: 'Select', key: 'V' },
+const TOOLS: { tool: Tool; Icon: typeof MousePointer2 }[] = [
+  { tool: 'circle', Icon: Circle },
+  { tool: 'rectangle', Icon: Square },
+  { tool: 'arrow', Icon: ArrowUpRight },
+  { tool: 'line', Icon: Minus },
+  { tool: 'text', Icon: Type },
+  { tool: 'select', Icon: MousePointer2 },
 ]
 
 function StrokeBarIcon({ width }: { width: number }) {
@@ -50,16 +50,17 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
   }, [])
 
   const [damageVisibility, setDamageVisibility] = useState(0)
+  const [showDamage, setShowDamage] = useState(false)
+  const [showMore, setShowMore] = useState(false)
+  const [showResetConfirm, setShowResetConfirm] = useState(false)
   const originalImgRef = useRef<HTMLImageElement | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const applyingRef = useRef(false)
-  const [showResetConfirm, setShowResetConfirm] = useState(false)
 
   const isTextMode = a.colorMode === 'text'
   const isStrokeMode = a.colorMode === 'stroke'
   const isFillMode = a.colorMode === 'fill'
   const isLine = a.selectedSubType === 'line'
-  const activeOpacity = isStrokeMode ? a.strokeOpacity : a.fillOpacity
   const activeSelectedColor = isTextMode ? a.activeTextColor : isStrokeMode ? a.activeColor : a.fillColor
   const nullSelected = isStrokeMode ? !a.isStroked : (isFillMode && !a.isFilled)
 
@@ -106,13 +107,29 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
     canvas.getObjects().forEach((o) => canvas.remove(o))
     canvas.discardActiveObject(); canvas.renderAll()
     canvas.fire('object:modified' as any)
-    setShowResetConfirm(false)
+    setShowResetConfirm(false); setShowMore(false)
   }, [a.fabricRef])
+
+  const toggleColorMode = useCallback(() => {
+    if (a.selectedType === 'text') {
+      a.setColorModeAction(isTextMode ? 'fill' : 'text')
+    } else {
+      a.setColorModeAction(isStrokeMode ? 'fill' : 'stroke')
+    }
+  }, [a, isTextMode, isStrokeMode])
 
   const wrapperStyle: React.CSSProperties = viewportHeight ? { height: `${viewportHeight}px` } : { height: '100dvh' }
 
   return (
-    <div className="flex flex-col bg-zinc-950 overflow-hidden" style={wrapperStyle}>
+    <div className="flex flex-col bg-zinc-950 overflow-hidden relative" style={wrapperStyle}>
+
+      {/* Back button — top left overlay on canvas */}
+      <button onClick={onBack}
+        className="absolute top-3 left-3 z-10 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-black/50 backdrop-blur-sm text-white text-sm font-medium active:bg-black/70">
+        <ArrowLeft size={16} />
+        <span>Back</span>
+      </button>
+
       {/* Canvas */}
       <div ref={containerRef} className="flex-1 overflow-hidden min-h-0">
         <canvas ref={canvasElRef} />
@@ -122,88 +139,50 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
       <div className="bg-zinc-900 border-t border-zinc-800 flex-shrink-0 select-none"
         style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
 
-        {/* Row 1: Back + tools */}
-        <div className="flex items-center px-1 border-b border-zinc-800/60" style={{ height: 56 }}>
-          <button onClick={onBack} className="flex items-center px-3 h-12 rounded-xl text-zinc-400 active:bg-zinc-800 shrink-0">
-            <ArrowLeft size={20} />
-          </button>
-          <div className="flex flex-1 justify-around">
-            {TOOLS.map(({ tool, Icon, key }) => (
-              <button key={tool} onClick={() => a.changeTool(tool)} title={key}
-                className={`flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-colors ${a.activeTool === tool ? 'bg-blue-600 text-white' : 'text-zinc-400 active:bg-zinc-800'}`}>
-                <Icon size={20} />
-                <span className={`text-[9px] leading-none mt-0.5 font-mono ${a.activeTool === tool ? 'text-blue-200' : 'text-zinc-600'}`}>{key}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Row 2: Stroke/Fill/Text tab — full words, full width */}
-        <div className="flex border-b border-zinc-800/60" style={{ height: 44 }}>
-          {isTextMode || a.selectedType === 'text' ? (
-            <>
-              <button onClick={() => a.setColorModeAction('text')}
-                className={`flex-1 text-sm font-semibold transition-colors border-r border-zinc-800 ${isTextMode ? 'bg-zinc-700 text-white' : 'text-zinc-400'}`}>
-                Text
-              </button>
-              <button onClick={() => a.setColorModeAction('fill')}
-                className={`flex-1 text-sm font-semibold transition-colors ${isFillMode ? 'bg-zinc-700 text-white' : 'text-zinc-400'}`}>
-                Fill
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => a.setColorModeAction('stroke')}
-                className={`flex-1 text-sm font-semibold transition-colors border-r border-zinc-800 ${isStrokeMode ? 'bg-zinc-700 text-white' : 'text-zinc-400'}`}>
-                Stroke
-              </button>
-              {!isLine && (
-                <button onClick={() => a.setColorModeAction('fill')}
-                  className={`flex-1 text-sm font-semibold transition-colors ${isFillMode ? 'bg-zinc-700 text-white' : 'text-zinc-400'}`}>
-                  Fill
-                </button>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Row 3: Color swatches + null */}
-        <div className="flex items-center justify-around px-3 border-b border-zinc-800/60" style={{ height: 52 }}>
-          {COLORS.map(({ value, label }) => (
-            <button key={value} onClick={() => a.changeColor(value)} title={label}
-              className={`w-9 h-9 rounded-full border-2 transition-all ${!nullSelected && activeSelectedColor === value ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
-              style={{ backgroundColor: value }} />
+        {/* Row 1: Tools — no key labels */}
+        <div className="flex items-center justify-around px-2 border-b border-zinc-800/60" style={{ height: 56 }}>
+          {TOOLS.map(({ tool, Icon }) => (
+            <button key={tool} onClick={() => a.changeTool(tool)}
+              className={`flex items-center justify-center w-12 h-12 rounded-xl transition-colors ${a.activeTool === tool ? 'bg-blue-600 text-white' : 'text-zinc-400 active:bg-zinc-800'}`}>
+              <Icon size={22} />
+            </button>
           ))}
-          {!isTextMode && (
-            <button
-              onClick={isStrokeMode ? a.clearStroke : a.clearFill}
-              title={isStrokeMode ? 'No stroke' : 'No fill'}
-              className={`w-9 h-9 rounded-full border-2 flex items-center justify-center transition-all ${nullSelected ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
-              style={{ backgroundColor: '#27272a' }}>
-              <NoColorIcon />
+        </div>
+
+        {/* Row 2: Mode toggle + color swatches + null */}
+        <div className="flex items-center gap-1 px-2 border-b border-zinc-800/60" style={{ height: 52 }}>
+          {/* Stroke/Fill toggle — hidden for lines (always stroke) */}
+          {!isLine && (
+            <button onClick={toggleColorMode}
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-colors ${isFillMode ? 'bg-zinc-600 text-white' : 'text-zinc-500 active:bg-zinc-800'}`}>
+              {isFillMode ? <PaintBucket size={18} /> : <Pen size={18} />}
             </button>
           )}
+          <div className="flex flex-1 items-center justify-around">
+            {COLORS.map(({ value, label }) => (
+              <button key={value} onClick={() => a.changeColor(value)} title={label}
+                className={`w-8 h-8 rounded-full border-2 transition-all ${!nullSelected && activeSelectedColor === value ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
+                style={{ backgroundColor: value }} />
+            ))}
+            {!isTextMode && (
+              <button
+                onClick={isStrokeMode ? a.clearStroke : a.clearFill}
+                className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${nullSelected ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
+                style={{ backgroundColor: '#27272a' }}>
+                <NoColorIcon />
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Row 4: Opacity slider */}
-        {!isTextMode && (
-          <div className="flex items-center gap-2 px-4 border-b border-zinc-800/60" style={{ height: 44 }}>
-            <span className="text-[11px] text-zinc-500 uppercase tracking-wide shrink-0 w-14">Opacity</span>
-            <input type="range" min={10} max={100} value={Math.round(activeOpacity * 100)}
-              onChange={(e) => a.changeOpacity(parseInt(e.target.value) / 100)}
-              className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-blue-500 bg-zinc-700" />
-            <span className="text-[11px] text-zinc-400 w-8 text-right shrink-0">{Math.round(activeOpacity * 100)}%</span>
-          </div>
-        )}
-
-        {/* Row 5: Border thickness — shapes and lines */}
+        {/* Context row: Stroke width (shapes/lines) */}
         {a.selectedType === 'shape' && (
-          <div className="flex items-center gap-3 px-4 border-b border-zinc-800/60" style={{ height: 52 }}>
-            <span className="text-[11px] text-zinc-500 uppercase tracking-wide shrink-0 w-14">Border</span>
-            <div className="flex flex-1 justify-around">
+          <div className="flex items-center gap-2 px-3 border-b border-zinc-800/60" style={{ height: 48 }}>
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-12">Width</span>
+            <div className="flex flex-1 gap-1">
               {STROKE_WIDTHS.map((w, i) => (
                 <button key={w} onClick={() => a.changeStrokeWidth(w)} title={STROKE_LABELS[i]}
-                  className={`flex-1 h-10 rounded-xl flex items-center justify-center mx-0.5 ${a.strokeWidth === w ? 'bg-blue-600' : 'active:bg-zinc-800'}`}>
+                  className={`flex-1 h-9 rounded-lg flex items-center justify-center ${a.strokeWidth === w ? 'bg-blue-600' : 'active:bg-zinc-800'}`}>
                   <StrokeBarIcon width={w} />
                 </button>
               ))}
@@ -211,71 +190,84 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
           </div>
         )}
 
-        {/* Row 5b: Font size — text only */}
+        {/* Context row: Font size (text) */}
         {a.selectedType === 'text' && (
-          <div className="flex items-center gap-3 px-4 border-b border-zinc-800/60" style={{ height: 52 }}>
-            <span className="text-[11px] text-zinc-500 uppercase tracking-wide shrink-0 w-14">Size</span>
-            <div className="flex flex-1 gap-2">
-              <button onClick={() => a.changeFontSize(-4)} className="flex-1 h-10 rounded-xl flex items-center justify-center text-zinc-400 active:bg-zinc-800">
-                <AArrowDown size={20} />
+          <div className="flex items-center gap-2 px-3 border-b border-zinc-800/60" style={{ height: 48 }}>
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-12">Size</span>
+            <div className="flex flex-1 items-center gap-2">
+              <button onClick={() => a.changeFontSize(-4)} className="flex-1 h-9 rounded-lg flex items-center justify-center text-zinc-300 active:bg-zinc-800">
+                <AArrowDown size={18} />
               </button>
-              <button onClick={() => a.changeFontSize(4)} className="flex-1 h-10 rounded-xl flex items-center justify-center text-zinc-400 active:bg-zinc-800">
-                <AArrowUp size={20} />
+              <span className="text-zinc-400 text-sm w-8 text-center">{a.fontSize}</span>
+              <button onClick={() => a.changeFontSize(4)} className="flex-1 h-9 rounded-lg flex items-center justify-center text-zinc-300 active:bg-zinc-800">
+                <AArrowUp size={18} />
               </button>
             </div>
           </div>
         )}
 
-        {/* Row 5c: Legend shape picker — when swatch tapped */}
-        {a.legendPickerColor && (
-          <div className="flex items-center gap-3 px-4 border-b border-zinc-800/60" style={{ height: 52 }}>
-            <div className="w-4 h-4 rounded-sm shrink-0" style={{ backgroundColor: a.legendPickerColor }} />
-            <span className="text-[11px] text-zinc-500 uppercase tracking-wide shrink-0">Place</span>
-            <button onClick={() => a.placeLegendShape('circle', a.legendPickerColor!)}
-              className="flex-1 h-10 rounded-xl flex items-center justify-center gap-1.5 text-zinc-400 active:bg-zinc-800 text-sm">
-              <Circle size={16} /> Circle
-            </button>
-            <button onClick={() => a.placeLegendShape('rectangle', a.legendPickerColor!)}
-              className="flex-1 h-10 rounded-xl flex items-center justify-center gap-1.5 text-zinc-400 active:bg-zinc-800 text-sm">
-              <Square size={16} /> Rect
-            </button>
+        {/* Damage slider — shown when toggled from actions row */}
+        {showDamage && (
+          <div className="flex items-center gap-3 px-4 border-b border-zinc-800/60" style={{ height: 44 }}>
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-12">Damage</span>
+            <input type="range" min={0} max={100} value={damageVisibility}
+              onChange={(e) => handleDamageSlider(parseInt(e.target.value))}
+              className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-orange-500 bg-zinc-700" />
+            <span className="text-[10px] text-zinc-400 w-8 text-right shrink-0">
+              {damageVisibility === 0 ? 'Off' : `${damageVisibility}%`}
+            </span>
           </div>
         )}
 
-        {/* Row 6: Damage slider */}
-        <div className="flex items-center gap-2 px-4 border-b border-zinc-800/60" style={{ height: 44 }}>
-          <span className="text-[11px] text-zinc-500 uppercase tracking-wide shrink-0 w-14">Damage</span>
-          <input type="range" min={0} max={100} value={damageVisibility}
-            onChange={(e) => handleDamageSlider(parseInt(e.target.value))}
-            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-orange-500 bg-zinc-700" />
-          <span className="text-[11px] text-zinc-400 w-8 text-right shrink-0">
-            {damageVisibility === 0 ? 'Off' : `${damageVisibility}%`}
-          </span>
-        </div>
-
-        {/* Row 7: Actions */}
+        {/* Row 3: Actions */}
         <div className="flex items-center justify-between px-2" style={{ height: 56 }}>
-          <div className="flex gap-0.5">
+          <div className="flex gap-1">
             <button onClick={a.undo} disabled={!a.canUndo} className="w-12 h-12 rounded-xl flex items-center justify-center text-zinc-400 active:bg-zinc-800 disabled:opacity-25"><Undo2 size={20} /></button>
             <button onClick={a.redo} disabled={!a.canRedo} className="w-12 h-12 rounded-xl flex items-center justify-center text-zinc-400 active:bg-zinc-800 disabled:opacity-25"><Redo2 size={20} /></button>
             <button onClick={a.deleteSelected} disabled={!a.hasSelection} className="w-12 h-12 rounded-xl flex items-center justify-center text-zinc-400 active:bg-zinc-800 disabled:opacity-25"><Trash2 size={20} /></button>
           </div>
-          <div className="flex gap-0.5">
-            <button onClick={a.createLegend} className="h-12 px-3 rounded-xl flex items-center gap-1.5 text-zinc-400 active:bg-zinc-800 text-xs font-medium"><List size={16} /><span>Legend</span></button>
-            <button onClick={() => setShowResetConfirm(true)} className="h-12 px-3 rounded-xl flex items-center gap-1.5 text-zinc-400 active:bg-zinc-800 text-xs font-medium"><RotateCcw size={16} /><span>Reset</span></button>
-          </div>
-          <div className="flex gap-1">
-            <button onClick={a.saveEditable} className="h-12 px-3 rounded-xl flex items-center gap-1.5 bg-zinc-700 active:bg-zinc-600 text-white text-xs font-medium"><Save size={14} /><span>Save</span></button>
-            <button onClick={a.downloadImage} className="h-12 px-3 rounded-xl flex items-center gap-1.5 bg-blue-600 active:bg-blue-500 text-white text-xs font-medium"><Download size={14} /><span>Export</span></button>
+          <div className="flex gap-1 items-center">
+            <button onClick={() => { setShowDamage(s => !s); setShowMore(false) }}
+              className={`h-12 px-3 rounded-xl flex items-center gap-1.5 text-xs font-medium transition-colors ${showDamage ? 'bg-orange-600/20 text-orange-400' : 'text-zinc-400 active:bg-zinc-800'}`}>
+              <Eye size={16} />
+              <span>Damage</span>
+            </button>
+            <button onClick={() => { setShowMore(s => !s); setShowDamage(false) }}
+              className={`w-12 h-12 rounded-xl flex items-center justify-center text-xs font-medium transition-colors ${showMore ? 'bg-zinc-700 text-white' : 'text-zinc-400 active:bg-zinc-800'}`}>
+              <MoreHorizontal size={20} />
+            </button>
+            <button onClick={a.downloadImage} className="h-12 px-4 rounded-xl flex items-center gap-1.5 bg-blue-600 active:bg-blue-500 text-white text-xs font-medium">
+              <Download size={14} /><span>Export</span>
+            </button>
           </div>
         </div>
       </div>
 
+      {/* More menu overlay */}
+      {showMore && (
+        <div className="fixed inset-0 z-40" onClick={() => setShowMore(false)}>
+          <div className="absolute bottom-[72px] right-3 bg-zinc-800 border border-zinc-700 rounded-2xl shadow-2xl overflow-hidden w-44"
+            onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => { a.createLegend(); setShowMore(false) }}
+              className="w-full flex items-center gap-3 px-4 py-3.5 text-sm text-zinc-200 active:bg-zinc-700 border-b border-zinc-700">
+              <List size={16} className="text-zinc-400" />
+              Legend
+            </button>
+            <button onClick={() => { setShowResetConfirm(true); setShowMore(false) }}
+              className="w-full flex items-center gap-3 px-4 py-3.5 text-sm text-red-400 active:bg-zinc-700">
+              <RotateCcw size={16} />
+              Reset canvas
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Reset confirm dialog */}
       {showResetConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-6">
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <h2 className="text-white font-semibold text-base mb-2">Delete all markings?</h2>
-            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">Are you sure you want to delete all markings? You can undo this with the undo button.</p>
+            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">This will remove all annotations. You can undo with the undo button.</p>
             <div className="flex gap-3">
               <button onClick={() => setShowResetConfirm(false)} className="flex-1 py-3 rounded-xl bg-zinc-700 active:bg-zinc-600 text-white text-sm font-medium">Cancel</button>
               <button onClick={handleResetConfirmed} className="flex-1 py-3 rounded-xl bg-red-600 active:bg-red-500 text-white text-sm font-medium">Delete All</button>
