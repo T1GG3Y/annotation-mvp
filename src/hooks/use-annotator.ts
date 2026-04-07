@@ -10,6 +10,7 @@ import * as fabric from 'fabric'
 export type Tool = 'select' | 'arrow' | 'line' | 'circle' | 'rectangle' | 'text'
 export type ColorMode = 'stroke' | 'fill' | 'text'
 export type SelectedType = 'text' | 'shape' | 'none'
+export type SelectedSubType = 'text' | 'line' | 'fillable' | 'none'
 export type AnnotationColor = '#EF4444' | '#FACC15' | '#0ADD08' | '#3B82F6' | '#EC4899' | '#FFFFFF' | '#000000'
 
 // 7 colors — rendered as 2 rows of 4 with a null button as the 8th cell
@@ -113,6 +114,62 @@ function applyBoxStrokeToAll(canvas: fabric.Canvas) {
   })
 }
 
+// Circular handle renderer for line endpoint controls
+function renderEndpointHandle(ctx: CanvasRenderingContext2D, left: number, top: number) {
+  ctx.save()
+  ctx.fillStyle = '#3B82F6'
+  ctx.strokeStyle = '#FFFFFF'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(left, top, 7, 0, 2 * Math.PI)
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+}
+
+// Replaces default Fabric controls on a Line with endpoint-only drag handles.
+// Dragging an endpoint moves that point; dragging the line body moves the whole line.
+function applyLineEndpointControls(line: fabric.Line) {
+  const makeEndpointControl = (which: 'p1' | 'p2') =>
+    new fabric.Control({
+      positionHandler: (_dim: any, finalMatrix: any, fabricObject: any) => {
+        const l = fabricObject as fabric.Line
+        const lp = l.calcLinePoints()
+        const pt = which === 'p1' ? { x: lp.x1, y: lp.y1 } : { x: lp.x2, y: lp.y2 }
+        return new fabric.Point(pt.x, pt.y).transform(finalMatrix)
+      },
+      actionHandler: (_evt: any, transform: any, x: number, y: number) => {
+        const l = transform.target as fabric.Line
+        const lp = l.calcLinePoints()
+        const matrix = l.calcTransformMatrix()
+        if (which === 'p1') {
+          const p2 = new fabric.Point(lp.x2, lp.y2).transform(matrix)
+          l.set({ x1: x, y1: y, x2: p2.x, y2: p2.y })
+        } else {
+          const p1 = new fabric.Point(lp.x1, lp.y1).transform(matrix)
+          l.set({ x1: p1.x, y1: p1.y, x2: x, y2: y })
+        }
+        l.setCoords()
+        return true
+      },
+      cursorStyle: 'crosshair',
+      actionName: 'modifyEndpoint',
+      render: renderEndpointHandle,
+      sizeX: 14,
+      sizeY: 14,
+    })
+
+  line.controls = { p1: makeEndpointControl('p1'), p2: makeEndpointControl('p2') }
+  line.hasBorders = false
+}
+
+function applyLineControlsToAll(canvas: fabric.Canvas) {
+  canvas.getObjects().forEach((obj: any) => {
+    if (obj.type === 'line') applyLineEndpointControls(obj as fabric.Line)
+  })
+}
+
+// Switch fully to select mode (tool changes too — used by Escape key)
 function applySelectMode(
   canvas: fabric.Canvas,
   setActiveTool: (t: Tool) => void,
@@ -122,6 +179,7 @@ function applySelectMode(
   canvas.selection = true; (canvas as any).skipTargetFind = false
   canvas.defaultCursor = 'default'; canvas.hoverCursor = 'move'
 }
+
 
 // ---------------------------------------------------------------------------
 // Hook
@@ -138,7 +196,7 @@ export interface UseAnnotatorOptions {
 export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, containerRef }: UseAnnotatorOptions) {
   const fabricRef = useRef<fabric.Canvas | null>(null)
 
-  const [activeTool, setActiveTool] = useState<Tool>('select')
+  const [activeTool, setActiveTool] = useState<Tool>('circle')
   const [colorMode, setColorMode] = useState<ColorMode>('stroke')
   const [activeColor, setActiveColor] = useState<AnnotationColor>('#EF4444')
   const [fillColor, setFillColor] = useState<AnnotationColor>('#000000')
@@ -147,22 +205,26 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const [fillOpacity, setFillOpacity] = useState(0.85)
   const [strokeWidth, setStrokeWidth] = useState(DEFAULT_STROKE)
   const [isFilled, setIsFilled] = useState(false)
+  const [isStroked, setIsStroked] = useState(true)
   const [fontSize, setFontSize] = useState(24)
   const [selectedType, setSelectedType] = useState<SelectedType>('none')
+  const [selectedSubType, setSelectedSubType] = useState<SelectedSubType>('none')
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [hasSelection, setHasSelection] = useState(false)
   const [legendPickerColor, setLegendPickerColor] = useState<string | null>(null)
 
-  const activeToolRef = useRef<Tool>('select')
+  const activeToolRef = useRef<Tool>('circle')
   const colorModeRef = useRef<ColorMode>('stroke')
   const activeColorRef = useRef<AnnotationColor>('#EF4444')
   const fillColorRef = useRef<AnnotationColor>('#000000')
   const activeTextColorRef = useRef<AnnotationColor>('#FFFFFF')
+  const lastTextFillColorRef = useRef<string>('#000000')
   const strokeOpacityRef = useRef(1.0)
   const fillOpacityRef = useRef(0.85)
   const strokeWidthRef = useRef(DEFAULT_STROKE)
   const isFilledRef = useRef(false)
+  const isStrokedRef = useRef(true)
   const fontSizeRef = useRef(24)
   const isDrawingRef = useRef(false)
   const startRef = useRef({ x: 0, y: 0 })
@@ -199,7 +261,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     if (!c || idx < 0 || idx >= historyRef.current.length) return
     loadingHistoryRef.current = true; hIdxRef.current = idx
     c.loadFromJSON(JSON.parse(historyRef.current[idx])).then(() => {
-      applyBoxStrokeToAll(c)
+      applyBoxStrokeToAll(c); applyLineControlsToAll(c)
       c.renderAll(); loadingHistoryRef.current = false; syncButtons()
     })
   }, [syncButtons])
@@ -216,7 +278,9 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     if (tool === 'select') {
       c.selection = true; (c as any).skipTargetFind = false; c.defaultCursor = 'default'; c.hoverCursor = 'move'
     } else {
-      c.selection = false; (c as any).skipTargetFind = true
+      // Keep skipTargetFind false so opt.target is populated in mouse:down
+      // (used to detect clicks on existing objects so we select rather than draw)
+      c.selection = false; (c as any).skipTargetFind = false
       c.discardActiveObject(); c.defaultCursor = 'crosshair'; c.hoverCursor = 'crosshair'; c.renderAll()
     }
   }, [])
@@ -250,22 +314,19 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
     if (mode === 'stroke') {
       setActiveColor(color); activeColorRef.current = color
-      if (obj) {
-        if (obj.type === 'i-text' || obj.type === 'textbox') {
-          // Text stroke is not supported — silently ignore (UI should hide stroke tab for text)
-        } else {
-          obj.set({ stroke: hexToRgba(color, strokeOpacityRef.current) })
-          c!.renderAll(); saveHistory()
-        }
+      setIsStroked(true); isStrokedRef.current = true
+      if (obj && obj.type !== 'i-text' && obj.type !== 'textbox') {
+        obj.set({ stroke: hexToRgba(color, strokeOpacityRef.current), strokeWidth: strokeWidthRef.current })
+        c!.renderAll(); saveHistory()
       }
-      // Rebuild legend if visible
       maybeUpdateLegendRef.current()
     } else {
       setFillColor(color); fillColorRef.current = color
       if (obj) {
         if (obj.type === 'i-text' || obj.type === 'textbox') {
-          obj.set({ backgroundColor: hexToRgba(color, fillOpacityRef.current) })
-          obj.dirty = true
+          const rgba = hexToRgba(color, fillOpacityRef.current)
+          obj.set({ backgroundColor: rgba }); obj.dirty = true
+          lastTextFillColorRef.current = rgba
         } else {
           setIsFilled(true); isFilledRef.current = true
           obj.set({ fill: hexToRgba(color, fillOpacityRef.current) })
@@ -282,6 +343,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const obj = c.getActiveObject(); if (!obj) return
     if (obj.type === 'i-text' || obj.type === 'textbox') {
       obj.set({ backgroundColor: '' }); obj.dirty = true
+      lastTextFillColorRef.current = ''
     } else {
       setIsFilled(false); isFilledRef.current = false
       obj.set({ fill: 'transparent' })
@@ -292,8 +354,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const clearStroke = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     const obj = c.getActiveObject(); if (!obj) return
-    // Text objects don't have stroke — only shapes
     if (obj.type !== 'i-text' && obj.type !== 'textbox') {
+      setIsStroked(false); isStrokedRef.current = false
       obj.set({ stroke: '', strokeWidth: 0 })
       c.renderAll(); saveHistory()
     }
@@ -530,11 +592,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       const w = container.clientWidth, h = container.clientHeight
       if (w === 0 || h === 0) return
       const canvas = new fabric.Canvas(el, { width: w, height: h, backgroundColor: '#18181b', selection: true, preserveObjectStacking: true })
+      // Free corner-scaling by default; hold Shift to lock aspect ratio
+      canvas.uniformScaling = false
       fabricRef.current = canvas
 
       if (initialState) {
         canvas.loadFromJSON(JSON.parse(initialState)).then(() => {
-          applyBoxStrokeToAll(canvas); canvas.renderAll(); saveHistory()
+          applyBoxStrokeToAll(canvas); applyLineControlsToAll(canvas); canvas.renderAll(); saveHistory()
         }).catch((e: any) => console.error('Load failed:', e))
       } else if (imageUrl && imageUrl !== '__saved__') {
         const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
@@ -551,12 +615,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       // Helper to derive selectedType from canvas
       const syncSelectedType = () => {
         const obj = canvas.getActiveObject()
-        if (!obj) { setSelectedType('none'); return }
+        if (!obj) { setSelectedType('none'); setSelectedSubType('none'); return }
         if (obj.type === 'i-text' || obj.type === 'textbox') {
-          setSelectedType('text')
-          // Default to text color mode when text is selected
+          setSelectedType('text'); setSelectedSubType('text')
           setColorMode('text'); colorModeRef.current = 'text'
-          // Sync text color state
           const currentFill = (obj as any).fill
           if (currentFill && typeof currentFill === 'string') {
             const hex = extractHex(currentFill) as AnnotationColor
@@ -565,8 +627,17 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           }
           return
         }
+        // Determine if this is a line/arrow (path or line object — no fill option)
+        const isLine = obj.type === 'line' || obj.type === 'path'
         setSelectedType('shape')
-        // When shape selected, stay in stroke/fill mode (don't switch to 'text')
+        setSelectedSubType(isLine ? 'line' : 'fillable')
+        // Sync isFilled / isStroked from object
+        const objFill = (obj as any).fill
+        const hasFill = objFill && objFill !== 'transparent' && objFill !== ''
+        setIsFilled(!!hasFill); isFilledRef.current = !!hasFill
+        const objStroke = (obj as any).stroke
+        const hasStroke = objStroke && objStroke !== ''
+        setIsStroked(!!hasStroke); isStrokedRef.current = !!hasStroke
         if (colorModeRef.current === 'text') {
           setColorMode('stroke'); colorModeRef.current = 'stroke'
         }
@@ -577,15 +648,18 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         const tool = activeToolRef.current, color = activeColorRef.current
         if (tool === 'select') return
         const pointer = getPointer(canvas, opt)
+
+        // Clicking on an existing object with a drawing tool → select it, don't draw
+        if (opt.target && !(opt.target as any).isLegendBg) {
+          canvas.setActiveObject(opt.target); canvas.renderAll(); return
+        }
+
         if (tool === 'text') {
-          const active = canvas.getActiveObject()
-          if (active && (active.type === 'i-text' || active.type === 'textbox') && (active as fabric.IText).isEditing) {
-            ;(active as fabric.IText).exitEditing(); return
-          }
+          const bgColor = lastTextFillColorRef.current || ''
           const txt = new fabric.IText('', {
             left: pointer.x, top: pointer.y,
             fontFamily: 'Arial, sans-serif', fontSize: fontSizeRef.current, fontWeight: 'bold',
-            fill: '#FFFFFF', backgroundColor: hexToRgba(fillColorRef.current, fillOpacityRef.current),
+            fill: '#FFFFFF', backgroundColor: bgColor,
             stroke: '', strokeWidth: 0,
             shadow: makeShadow(),
           })
@@ -594,12 +668,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         }
         isDrawingRef.current = true; startRef.current = { x: pointer.x, y: pointer.y }
         const sw = strokeWidthRef.current, filled = isFilledRef.current
-        const strokeColor = hexToRgba(color, strokeOpacityRef.current)
+        const strokeColor = isStrokedRef.current ? hexToRgba(color, strokeOpacityRef.current) : ''
+        const strokeW = isStrokedRef.current ? sw : 0
         const fillVal = filled ? hexToRgba(fillColorRef.current, fillOpacityRef.current) : 'transparent'
         let shape: fabric.FabricObject | null = null
-        if (tool === 'circle') shape = new fabric.Ellipse({ left: pointer.x, top: pointer.y, rx: 0, ry: 0, fill: fillVal, stroke: strokeColor, strokeWidth: sw, strokeUniform: true, shadow: makeShadow(), originX: 'center', originY: 'center' })
-        else if (tool === 'rectangle') shape = new fabric.Rect({ left: pointer.x, top: pointer.y, width: 0, height: 0, fill: fillVal, stroke: strokeColor, strokeWidth: sw, strokeUniform: true, shadow: makeShadow(), rx: 8, ry: 8 })
-        else if (tool === 'line' || tool === 'arrow') shape = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], { stroke: strokeColor, strokeWidth: sw, strokeUniform: true, strokeLineCap: 'round', shadow: makeShadow() })
+        if (tool === 'circle') shape = new fabric.Ellipse({ left: pointer.x, top: pointer.y, rx: 0, ry: 0, fill: fillVal, stroke: strokeColor, strokeWidth: strokeW, strokeUniform: true, shadow: makeShadow(), originX: 'center', originY: 'center' })
+        else if (tool === 'rectangle') shape = new fabric.Rect({ left: pointer.x, top: pointer.y, width: 0, height: 0, fill: fillVal, stroke: strokeColor, strokeWidth: strokeW, strokeUniform: true, shadow: makeShadow(), rx: 8, ry: 8 })
+        else if (tool === 'line' || tool === 'arrow') shape = new fabric.Line([pointer.x, pointer.y, pointer.x, pointer.y], { stroke: strokeColor || hexToRgba(color, strokeOpacityRef.current), strokeWidth: sw, strokeUniform: true, strokeLineCap: 'round', shadow: makeShadow() })
         if (shape) { canvas.add(shape); shapeRef.current = shape; canvas.selection = false }
       })
 
@@ -652,10 +727,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
             )
             canvas.add(arrow); canvas.setActiveObject(arrow); arrow.setCoords(); saveHistory()
           } else {
+            if (shape.type === 'line') applyLineEndpointControls(shape as fabric.Line)
             shape.setCoords(); canvas.setActiveObject(shape); saveHistory()
           }
         }
-        applySelectMode(canvas, setActiveTool, activeToolRef)
+        // Keep drawing tool active — only re-enable selection so the placed shape has handles
+        canvas.selection = true; (canvas as any).skipTargetFind = false
+        canvas.defaultCursor = 'crosshair'
         maybeUpdateLegendRef.current()
         shapeRef.current = null; canvas.renderAll()
       })
@@ -702,8 +780,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           legendLabelsRef.current[(t as any).legendColor] = t.text || 'Edit'
         }
         saveHistory()
+        // Select the text object but keep the text tool active (same pattern as shapes)
         if (t && t.text?.trim() !== '') canvas.setActiveObject(t)
-        applySelectMode(canvas, setActiveTool, activeToolRef)
+        // Re-enable canvas selection so handles work, but keep text tool
+        canvas.selection = true; (canvas as any).skipTargetFind = false
         canvas.renderAll()
       })
 
@@ -723,8 +803,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           case 'Escape':
             e.preventDefault()
             if (isEditing) { ;(active as fabric.IText).exitEditing(); canvas.setActiveObject(active!) }
-            else { canvas.discardActiveObject() }
-            canvas.renderAll(); changeTool('select'); break
+            else { canvas.discardActiveObject(); changeTool('select') }
+            canvas.renderAll(); break
           case 'Delete': case 'Backspace': if (!isEditing) { e.preventDefault(); deleteSelected() } break
           case 'v': case 'V': if (!isEditing) changeTool('select'); break
           case 'a': case 'A': if (!isEditing) changeTool('arrow'); break
@@ -746,7 +826,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
   return {
     activeTool, colorMode, activeColor, fillColor, activeTextColor, strokeOpacity, fillOpacity, strokeWidth,
-    isFilled, fontSize, selectedType, canUndo, canRedo, hasSelection, legendPickerColor,
+    isFilled, isStroked, fontSize, selectedType, selectedSubType, canUndo, canRedo, hasSelection, legendPickerColor,
     changeTool, setColorModeAction, toggleColorMode, changeColor, clearFill, clearStroke,
     changeOpacity, changeStrokeWidth, changeFontSize,
     copySelected, pasteSelected, duplicateSelected,

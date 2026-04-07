@@ -53,8 +53,11 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
   const isTextMode = a.colorMode === 'text'
   const isStrokeMode = a.colorMode === 'stroke'
   const isFillMode = a.colorMode === 'fill'
+  const isLine = a.selectedSubType === 'line'
   const activeOpacity = isStrokeMode ? a.strokeOpacity : a.fillOpacity
   const activeSelectedColor = isTextMode ? a.activeTextColor : isStrokeMode ? a.activeColor : a.fillColor
+  // Null is "selected" when: in stroke mode and no stroke, OR in fill mode and no fill
+  const nullSelected = isStrokeMode ? !a.isStroked : (isFillMode && !a.isFilled)
 
   useEffect(() => {
     if (!imageUrl || imageUrl === '__saved__') return
@@ -69,33 +72,22 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
     const origImg = originalImgRef.current
     if (!canvas || !origImg || applyingRef.current) return
     applyingRef.current = true
-
     const bg = canvas.backgroundImage as fabric.FabricImage | undefined
-    const scaleX = bg?.scaleX ?? 1
-    const scaleY = bg?.scaleY ?? 1
-    const left = bg?.left ?? canvas.width! / 2
-    const top = bg?.top ?? canvas.height! / 2
-
+    const scaleX = bg?.scaleX ?? 1, scaleY = bg?.scaleY ?? 1
+    const left = bg?.left ?? canvas.width! / 2, top = bg?.top ?? canvas.height! / 2
     const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
     if (!loader) { applyingRef.current = false; return }
-
     if (strength === 0) {
       loader.call((fabric as any).FabricImage ?? (fabric as any).Image, imageUrl, { crossOrigin: 'anonymous' })
-        .then((img: any) => {
-          img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top })
-          canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false
-        }).catch(() => { applyingRef.current = false })
-      return
+        .then((img: any) => { img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top }); canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false })
+        .catch(() => { applyingRef.current = false }); return
     }
-
     try {
       const enhanced = applyDamageVisibility(origImg, strength / 100)
       const dataUrl = enhanced.toDataURL('image/jpeg', 0.92)
       loader.call((fabric as any).FabricImage ?? (fabric as any).Image, dataUrl, { crossOrigin: 'anonymous' })
-        .then((img: any) => {
-          img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top })
-          canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false
-        }).catch(() => { applyingRef.current = false })
+        .then((img: any) => { img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top }); canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false })
+        .catch(() => { applyingRef.current = false })
     } catch { applyingRef.current = false }
   }, [a.fabricRef, imageUrl])
 
@@ -142,8 +134,9 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
 
         {sectionLabel('Color')}
         <div className="px-3">
+          {/* Tab row */}
           <div className="flex rounded-lg overflow-hidden border border-zinc-700 mb-3">
-            {a.selectedType === 'text' ? (
+            {isTextMode || a.selectedType === 'text' ? (
               <>
                 <button onClick={() => a.setColorModeAction('text')}
                   className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${isTextMode ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
@@ -160,31 +153,37 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
                   className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${isStrokeMode ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
                   Stroke
                 </button>
-                <button onClick={() => a.setColorModeAction('fill')}
-                  className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${isFillMode ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
-                  Fill
-                </button>
+                {/* Hide fill tab for lines/arrows */}
+                {!isLine && (
+                  <button onClick={() => a.setColorModeAction('fill')}
+                    className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${isFillMode ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
+                    Fill
+                  </button>
+                )}
               </>
             )}
           </div>
 
+          {/* 2×4 color grid: 7 colors + null */}
           <div className="grid grid-cols-4 gap-1.5">
             {COLORS.map(({ value, label }) => (
               <button key={value} onClick={() => a.changeColor(value)} title={label}
-                className={`w-8 h-8 rounded-full border-2 transition-all ${activeSelectedColor === value ? 'border-blue-500 scale-110' : 'border-zinc-600 hover:border-zinc-400'}`}
+                className={`w-8 h-8 rounded-full border-2 transition-all ${!nullSelected && activeSelectedColor === value ? 'border-blue-500 scale-110' : 'border-zinc-600 hover:border-zinc-400'}`}
                 style={{ backgroundColor: value }} />
             ))}
+            {/* Null cell — no color; hide for text color mode */}
             {!isTextMode && (
               <button
                 onClick={isStrokeMode ? a.clearStroke : a.clearFill}
                 title={isStrokeMode ? 'No stroke' : 'No fill'}
-                className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${isFillMode && !a.isFilled ? 'border-blue-500 scale-110' : 'border-zinc-600 hover:border-zinc-400'}`}
+                className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${nullSelected ? 'border-blue-500 scale-110' : 'border-zinc-600 hover:border-zinc-400'}`}
                 style={{ backgroundColor: '#27272a' }}>
                 <NoColorIcon />
               </button>
             )}
           </div>
 
+          {/* Opacity — only for stroke/fill */}
           {!isTextMode && (
             <div className="mt-3">
               <div className="flex items-center justify-between mb-1">
@@ -198,6 +197,7 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
           )}
         </div>
 
+        {/* Border — shapes and lines */}
         {a.selectedType === 'shape' && (
           <>
             {sectionLabel('Border')}
@@ -212,22 +212,22 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
           </>
         )}
 
+        {/* Font size — text only */}
         {a.selectedType === 'text' && (
           <>
             {sectionLabel('Font Size')}
             <div className="px-3 flex items-center gap-2">
-              <button onClick={() => a.changeFontSize(-4)} title="Decrease font size"
-                className="flex-1 h-10 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-white">
+              <button onClick={() => a.changeFontSize(-4)} className="flex-1 h-10 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-white">
                 <AArrowDown size={20} />
               </button>
-              <button onClick={() => a.changeFontSize(4)} title="Increase font size"
-                className="flex-1 h-10 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-white">
+              <button onClick={() => a.changeFontSize(4)} className="flex-1 h-10 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-white">
                 <AArrowUp size={20} />
               </button>
             </div>
           </>
         )}
 
+        {/* Legend shape picker */}
         {a.legendPickerColor && (
           <>
             {sectionLabel('Place Shape')}
@@ -288,14 +288,8 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
               Are you sure you want to delete all markings? You can undo this with the undo button.
             </p>
             <div className="flex gap-3">
-              <button onClick={() => setShowResetConfirm(false)}
-                className="flex-1 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-white text-sm font-medium transition-colors">
-                Cancel
-              </button>
-              <button onClick={handleResetConfirmed}
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">
-                Delete All
-              </button>
+              <button onClick={() => setShowResetConfirm(false)} className="flex-1 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-white text-sm font-medium">Cancel</button>
+              <button onClick={handleResetConfirmed} className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-medium">Delete All</button>
             </div>
           </div>
         </div>
