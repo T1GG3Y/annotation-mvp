@@ -49,6 +49,42 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
     return () => { vv.removeEventListener('resize', update); vv.removeEventListener('scroll', update) }
   }, [])
 
+  // Pinch-to-zoom: intercept 2-finger touch before Fabric sees it
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    let startDist = 0, startZoom = 1, pinchMidX = 0, pinchMidY = 0
+    const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return
+      e.preventDefault(); e.stopPropagation()
+      startDist = dist(e.touches)
+      startZoom = a.fabricRef.current?.getZoom() ?? 1
+      pinchMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2
+      pinchMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+    }
+    const onMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2 || !startDist) return
+      e.preventDefault(); e.stopPropagation()
+      const newZoom = Math.max(0.3, Math.min(8, startZoom * (dist(e.touches) / startDist)))
+      const canvas = a.fabricRef.current
+      if (canvas) {
+        const rect = container.getBoundingClientRect()
+        canvas.zoomToPoint(new fabric.Point(pinchMidX - rect.left, pinchMidY - rect.top), newZoom)
+        canvas.renderAll()
+      }
+    }
+    const onEnd = (e: TouchEvent) => { if (e.touches.length < 2) startDist = 0 }
+    container.addEventListener('touchstart', onStart, { passive: false, capture: true })
+    container.addEventListener('touchmove', onMove, { passive: false, capture: true })
+    container.addEventListener('touchend', onEnd, { capture: true })
+    return () => {
+      container.removeEventListener('touchstart', onStart, { capture: true })
+      container.removeEventListener('touchmove', onMove, { capture: true })
+      container.removeEventListener('touchend', onEnd, { capture: true })
+    }
+  }, []) // a.fabricRef.current accessed at event time, no deps needed
+
   const [damageVisibility, setDamageVisibility] = useState(0)
   const [showDamage, setShowDamage] = useState(false)
   const [showMore, setShowMore] = useState(false)
@@ -78,21 +114,28 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
     if (!canvas || !origImg || applyingRef.current) return
     applyingRef.current = true
     const bg = canvas.backgroundImage as fabric.FabricImage | undefined
-    const scaleX = bg?.scaleX ?? 1, scaleY = bg?.scaleY ?? 1
+    // Capture the displayed pixel size of the current background to preserve it exactly
+    const displayW = bg ? (bg.width! * (bg.scaleX ?? 1)) : null
+    const displayH = bg ? (bg.height! * (bg.scaleY ?? 1)) : null
     const left = bg?.left ?? canvas.width! / 2, top = bg?.top ?? canvas.height! / 2
     const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
     if (!loader) { applyingRef.current = false; return }
+    const applyImg = (img: any) => {
+      // Scale the new image to exactly match the current displayed size, regardless of pixel dimensions
+      const sX = displayW !== null && img.width ? displayW / img.width : (Math.min(canvas.width!, canvas.height! * (img.width / img.height)) * 0.95 / img.width)
+      const sY = displayH !== null && img.height ? displayH / img.height : sX
+      img.set({ scaleX: sX, scaleY: sY, originX: 'center', originY: 'center', left, top })
+      canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false
+    }
     if (strength === 0) {
       loader.call((fabric as any).FabricImage ?? (fabric as any).Image, imageUrl, { crossOrigin: 'anonymous' })
-        .then((img: any) => { img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top }); canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false })
-        .catch(() => { applyingRef.current = false }); return
+        .then(applyImg).catch(() => { applyingRef.current = false }); return
     }
     try {
       const enhanced = applyDamageVisibility(origImg, strength / 100)
       const dataUrl = enhanced.toDataURL('image/jpeg', 0.92)
       loader.call((fabric as any).FabricImage ?? (fabric as any).Image, dataUrl, { crossOrigin: 'anonymous' })
-        .then((img: any) => { img.set({ scaleX, scaleY, originX: 'center', originY: 'center', left, top }); canvas.backgroundImage = img; canvas.renderAll(); applyingRef.current = false })
-        .catch(() => { applyingRef.current = false })
+        .then(applyImg).catch(() => { applyingRef.current = false })
     } catch { applyingRef.current = false }
   }, [a.fabricRef, imageUrl])
 

@@ -31,7 +31,7 @@ const DEFAULT_STROKE = 6
 const MAX_HISTORY = 40
 
 // Custom properties to persist through JSON serialization
-const CUSTOM_PROPS = ['_boxStroke', '_boxStrokeWidth', 'isLegend', 'isLegendBg', 'legendColor']
+const CUSTOM_PROPS = ['_boxStroke', '_boxStrokeWidth', 'isLegend', 'isLegendBg', 'legendColor', '_legendScale']
 
 function makeShadow() {
   return new fabric.Shadow({ color: 'rgba(0,0,0,0.92)', blur: 20, offsetX: 4, offsetY: 4 })
@@ -524,25 +524,28 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     })
   }, [])
 
-  const buildLegend = useCallback((colors: string[], position?: { x: number; y: number }) => {
+  const buildLegend = useCallback((colors: string[], position?: { x: number; y: number }, scale = 1) => {
     const c = fabricRef.current; if (!c) return
     c.getObjects().filter((o: any) => o.isLegend).forEach((o) => c.remove(o))
     if (colors.length === 0) { c.renderAll(); return }
-    const pad = 14, rowH = 30, swatchSz = 18, totalW = pad * 2 + swatchSz + 10 + 140, titleH = 28
-    const totalH = pad + titleH + colors.length * rowH + pad / 2
+    const s = Math.max(0.25, scale)
+    const pad = Math.round(14 * s), rowH = Math.round(30 * s), swatchSz = Math.round(18 * s)
+    const labelGap = Math.round(10 * s), titleH = Math.round(28 * s)
+    const totalW = Math.round(196 * s) // 14*2 + 18 + 10 + 140
+    const totalH = pad + titleH + colors.length * rowH + Math.round(pad / 2)
     const x = position?.x ?? (c.width! - totalW) / 2, y = position?.y ?? (c.height! - totalH) / 2
-    const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: totalH, fill: 'rgba(0,0,0,0.8)', rx: 8, ry: 8, stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
-    ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; c.add(bg)
-    const title = new fabric.Text('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: 13, fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
+    const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: totalH, fill: 'rgba(0,0,0,0.8)', rx: Math.round(8 * s), ry: Math.round(8 * s), stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
+    ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; c.add(bg)
+    const title = new fabric.Text('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: Math.round(13 * s), fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
     ;(title as any).isLegend = true; c.add(title)
     colors.forEach((color, i) => {
       const rowY = y + pad + titleH + i * rowH
       // Swatch is evented+selectable so user can click it to pick the color for shape placement
-      const sw = new fabric.Rect({ left: x + pad, top: rowY, width: swatchSz, height: swatchSz, fill: color, rx: 3, ry: 3, selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
+      const sw = new fabric.Rect({ left: x + pad, top: rowY, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
       ;(sw as any).isLegend = true; (sw as any).isLegendSwatch = true; (sw as any).legendColor = color; c.add(sw)
       const label = new fabric.IText(legendLabelsRef.current[color] || 'Edit', {
-        left: x + pad + swatchSz + 10, top: rowY - 1,
-        fontFamily: 'Arial, sans-serif', fontSize: 15, fill: '#FFFFFF', editable: true,
+        left: x + pad + swatchSz + labelGap, top: rowY - 1,
+        fontFamily: 'Arial, sans-serif', fontSize: Math.round(15 * s), fill: '#FFFFFF', editable: true,
         selectable: true, evented: true, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false,
       })
       ;(label as any).isLegend = true; (label as any).legendColor = color; c.add(label)
@@ -575,7 +578,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     // Rebuild if colors differ in any way (additions or removals)
     const same = usedColors.length === cur.length && usedColors.every((clr) => cur.includes(clr))
     if (same) return
-    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! })
+    const currentScale = (existingBg as any)._legendScale ?? 1
+    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! }, currentScale)
     saveHistory()
   }, [buildLegend, saveLegendLabels, saveHistory])
 
@@ -740,8 +744,9 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
       canvas.on('selection:created', (opt: any) => {
         setHasSelection(true); syncSelectedType()
-        // Check if a legend swatch was clicked
         const obj = opt.selected?.[0] as any
+        // Uniform scaling for legend bg so it scales proportionally
+        canvas.uniformScaling = !!obj?.isLegendBg
         if (obj?.isLegendSwatch && obj?.legendColor) {
           setLegendPickerColor(obj.legendColor)
           canvas.discardActiveObject(); canvas.renderAll()
@@ -752,6 +757,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       canvas.on('selection:updated', (opt: any) => {
         setHasSelection(true); syncSelectedType()
         const obj = opt.selected?.[0] as any
+        canvas.uniformScaling = !!obj?.isLegendBg
         if (obj?.isLegendSwatch && obj?.legendColor) {
           setLegendPickerColor(obj.legendColor)
           canvas.discardActiveObject(); canvas.renderAll()
@@ -759,8 +765,35 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           setLegendPickerColor(null)
         }
       })
-      canvas.on('selection:cleared', () => { setHasSelection(false); setSelectedType('none'); setLegendPickerColor(null) })
-      canvas.on('object:modified', () => saveHistory())
+      canvas.on('selection:cleared', () => {
+        setHasSelection(false); setSelectedType('none'); setLegendPickerColor(null)
+        canvas.uniformScaling = false
+      })
+
+      // While scaling the legend bg, hide child items so only the box is visible
+      canvas.on('object:scaling', (opt: any) => {
+        const obj = opt.target as any
+        if (obj?.isLegendBg) {
+          canvas.getObjects().forEach((o: any) => { if (o.isLegend && !o.isLegendBg) o.opacity = 0 })
+        }
+      })
+
+      canvas.on('object:modified', (opt: any) => {
+        const obj = opt.target as any
+        if (obj?.isLegendBg && (obj.scaleX !== 1 || obj.scaleY !== 1)) {
+          // Rebuild legend at new proportional scale
+          const baseScale = (obj._legendScale ?? 1) as number
+          const newScale = baseScale * ((obj.scaleX ?? 1) + (obj.scaleY ?? 1)) / 2
+          const pos = { x: obj.left!, y: obj.top! }
+          // Collect colors before rebuild removes them
+          const existingColors = [...new Set(
+            canvas.getObjects().filter((o: any) => o.isLegend && o.legendColor).map((o: any) => o.legendColor as string)
+          )]
+          saveLegendLabels()
+          if (existingColors.length > 0) buildLegend(existingColors, pos, newScale)
+        }
+        saveHistory()
+      })
 
       let legendDragStart: { x: number; y: number } | null = null
       canvas.on('object:moving', (opt) => {
@@ -769,7 +802,16 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         legendDragStart = { x: obj.left!, y: obj.top! }
         canvas.getObjects().forEach((o: any) => { if (o.isLegend && o !== obj) { o.set({ left: o.left! + dx, top: o.top! + dy }); o.setCoords() } })
       })
-      canvas.on('mouse:down', (opt) => { const t = opt.target as any; if (t?.isLegendBg) legendDragStart = { x: t.left!, y: t.top! } })
+      canvas.on('mouse:down', (opt) => {
+        const t = opt.target as any
+        if (t?.isLegendBg) legendDragStart = { x: t.left!, y: t.top! }
+        // Single click enters editing mode for legend text labels
+        if (t?.isLegend && t.type === 'i-text') {
+          canvas.setActiveObject(t)
+          ;(t as fabric.IText).enterEditing()
+          canvas.renderAll()
+        }
+      })
       canvas.on('mouse:up', () => { legendDragStart = null })
 
       canvas.on('text:editing:exited', (opt: any) => {
