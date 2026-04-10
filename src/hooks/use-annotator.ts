@@ -203,6 +203,41 @@ function applyLineControlsToAll(canvas: fabric.Canvas) {
   })
 }
 
+// Re-measures actual Textbox heights and repositions all legend rows + resizes bg.
+// Called after text changes so the bg always fits its content.
+function relayoutLegend(canvas: fabric.Canvas) {
+  const bg = canvas.getObjects().find((o: any) => o.isLegendBg) as any
+  if (!bg) return
+  const s = (bg._legendScale ?? 1) as number
+  const pad = Math.round(14 * s), titleH = Math.round(28 * s)
+  const swatchSz = Math.round(18 * s), xBtnSize = Math.round(16 * s)
+  const rowPad = Math.round(8 * s)
+  const y = bg.top as number
+
+  // Labels in canvas insertion order (which matches colors order)
+  const labels = canvas.getObjects().filter((o: any) =>
+    o.isLegend && (o.type === 'textbox' || o.type === 'i-text') && o.legendColor && !o.isLegendX
+  ) as any[]
+
+  let curY = y + pad + titleH
+  labels.forEach((label: any) => {
+    const color = label.legendColor
+    const swatch = canvas.getObjects().find((o: any) => o.isLegendSwatch && o.legendColor === color) as any
+    const xBtn = canvas.getObjects().find((o: any) => o.isLegendX && o.legendColor === color) as any
+    const labelH = Math.max(swatchSz, label.height ?? swatchSz)
+    const rowH = labelH + rowPad
+    const rowMid = curY + rowH / 2
+    if (swatch) { swatch.set({ top: rowMid - swatchSz / 2 }); swatch.setCoords() }
+    label.set({ top: curY }); label.setCoords()
+    if (xBtn) { xBtn.set({ top: rowMid - xBtnSize / 2 }); xBtn.setCoords() }
+    curY += rowH
+  })
+
+  const newH = (curY - y) + Math.round(pad / 2)
+  bg.set({ height: newH }); bg.setCoords()
+  canvas.renderAll()
+}
+
 // Switch fully to select mode (tool changes too — used by Escape key)
 function applySelectMode(
   canvas: fabric.Canvas,
@@ -558,7 +593,9 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const saveLegendLabels = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     c.getObjects().forEach((o: any) => {
-      if (o.isLegend && o.legendColor && (o.type === 'i-text' || o.type === 'textbox' || o.type === 'text'))
+      // Exclude X buttons (type 'text' / FabricText) — they contain '✕' not a label
+      if (o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch &&
+          (o.type === 'i-text' || o.type === 'textbox' || o.type === 'text'))
         legendLabelsRef.current[o.legendColor] = o.text || 'edit'
     })
   }, [])
@@ -567,14 +604,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const c = fabricRef.current; if (!c) return
     c.getObjects().filter((o: any) => o.isLegend).forEach((o) => c.remove(o))
     const s = Math.max(0.25, scale)
-    const pad = Math.round(14 * s), rowH = Math.round(32 * s), swatchSz = Math.round(18 * s)
+    const pad = Math.round(14 * s), swatchSz = Math.round(18 * s)
     const labelGap = Math.round(10 * s), titleH = Math.round(28 * s)
-    const xBtnSize = Math.round(16 * s), xBtnGap = Math.round(8 * s)
+    const xBtnSize = Math.round(16 * s), rowPad = Math.round(8 * s)
     const totalW = Math.round(220 * s)
-    const maxLabelW = totalW - pad * 2 - swatchSz - labelGap - xBtnSize - xBtnGap
+    const maxLabelW = totalW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
+    const fontSize = Math.round(15 * s)
 
     if (colors.length === 0) {
-      // Empty state — show instructional text
       const emptyH = pad * 2 + Math.round(60 * s)
       const x = position?.x ?? (c.width! - totalW) / 2, y = position?.y ?? (c.height! - emptyH) / 2
       const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: emptyH, fill: 'rgba(0,0,0,0.8)', rx: Math.round(8 * s), ry: Math.round(8 * s), stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
@@ -584,33 +621,52 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       c.renderAll(); return
     }
 
-    const totalH = pad + titleH + colors.length * rowH + Math.round(pad / 2)
+    // --- Two-pass layout: measure Textbox heights first, then place everything ---
+    // Pass 1: create all Textboxes off-screen to measure their wrapped height
+    const labelTexts = colors.map(color => legendLabelsRef.current[color] || 'edit')
+    const tempLabels = labelTexts.map(text => {
+      const tb = new fabric.Textbox(text, {
+        left: -9999, top: -9999,
+        fontFamily: 'Arial, sans-serif', fontSize, fill: '#FFFFFF',
+        width: maxLabelW, splitByGrapheme: false,
+      })
+      c.add(tb); tb.initDimensions()
+      return tb
+    })
+    const rowHeights = tempLabels.map(tb => Math.max(swatchSz, tb.height ?? swatchSz) + rowPad)
+    tempLabels.forEach(tb => c.remove(tb))
+
+    const totalH = pad + titleH + rowHeights.reduce((a, b) => a + b, 0) + Math.round(pad / 2)
     const x = position?.x ?? (c.width! - totalW) / 2, y = position?.y ?? (c.height! - totalH) / 2
+
+    // Background box — height calculated from actual content
     const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: totalH, fill: 'rgba(0,0,0,0.8)', rx: Math.round(8 * s), ry: Math.round(8 * s), stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
     ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; c.add(bg)
     const title = new fabric.FabricText('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: Math.round(13 * s), fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
     ;(title as any).isLegend = true; c.add(title)
+
+    // Pass 2: place rows using measured heights
+    let curY = y + pad + titleH
     colors.forEach((color, i) => {
-      const rowY = y + pad + titleH + i * rowH
-      const sw = new fabric.Rect({ left: x + pad, top: rowY, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
+      const rowH = rowHeights[i]
+      const rowMid = curY + rowH / 2
+      const sw = new fabric.Rect({ left: x + pad, top: rowMid - swatchSz / 2, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
       ;(sw as any).isLegend = true; (sw as any).isLegendSwatch = true; (sw as any).legendColor = color; c.add(sw)
-      // Label with word-wrap: Textbox wraps at maxLabelW so text never overflows the border
-      const labelText = legendLabelsRef.current[color] || 'edit'
-      const label = new fabric.Textbox(labelText, {
-        left: x + pad + swatchSz + labelGap, top: rowY - 1,
-        fontFamily: 'Arial, sans-serif', fontSize: Math.round(15 * s), fill: '#FFFFFF', editable: true,
+      const label = new fabric.Textbox(labelTexts[i], {
+        left: x + pad + swatchSz + labelGap, top: curY,
+        fontFamily: 'Arial, sans-serif', fontSize, fill: '#FFFFFF', editable: true,
         selectable: true, evented: true, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false,
         width: maxLabelW, splitByGrapheme: false,
       })
       ;(label as any).isLegend = true; (label as any).legendColor = color; c.add(label)
-      // X button — hidden until legend bg is selected
       const xBtn = new fabric.FabricText('✕', {
-        left: x + totalW - pad - xBtnSize, top: rowY,
+        left: x + totalW - pad - xBtnSize, top: rowMid - xBtnSize / 2,
         fontFamily: 'Arial, sans-serif', fontSize: Math.round(12 * s), fill: 'rgba(255,255,255,0.55)',
         selectable: false, evented: false, hasControls: false, hasBorders: false, hoverCursor: 'pointer',
         lockMovementX: true, lockMovementY: true, visible: false,
       })
       ;(xBtn as any).isLegend = true; (xBtn as any).isLegendX = true; (xBtn as any).legendColor = color; c.add(xBtn)
+      curY += rowH
     })
     c.renderAll()
   }, [])
@@ -869,12 +925,12 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           const baseScale = (obj._legendScale ?? 1) as number
           const newScale = baseScale * ((obj.scaleX ?? 1) + (obj.scaleY ?? 1)) / 2
           const pos = { x: obj.left!, y: obj.top! }
-          // Collect colors before rebuild removes them
-          const existingColors = [...new Set(
-            canvas.getObjects().filter((o: any) => o.isLegend && o.legendColor).map((o: any) => o.legendColor as string)
-          )]
+          // Collect colors before rebuild removes them (exclude X buttons and swatches — only labels/bg carry canonical color list)
           saveLegendLabels()
-          if (existingColors.length > 0) buildLegend(existingColors, pos, newScale)
+          const existingColors = [...new Set(
+            canvas.getObjects().filter((o: any) => o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch && !o.isLegendBg).map((o: any) => o.legendColor as string)
+          )]
+          buildLegend(existingColors, pos, newScale)
         }
         saveHistory()
       })
@@ -904,12 +960,19 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       })
       canvas.on('mouse:up', () => { legendDragStart = null })
 
+      // Live-resize legend box as user types
+      canvas.on('text:changed', (opt: any) => {
+        const t = opt.target as any
+        if (t?.isLegend && t.legendColor) relayoutLegend(canvas)
+      })
+
       canvas.on('text:editing:exited', (opt: any) => {
         const t = opt.target
         if (t && typeof t.text === 'string' && t.text.trim() === '' && !(t as any).isLegend) {
           canvas.remove(t)
         } else if (t && (t as any).isLegend && (t as any).legendColor) {
           legendLabelsRef.current[(t as any).legendColor] = t.text || 'edit'
+          relayoutLegend(canvas)
         }
         saveHistory()
         // Select the text object but keep the text tool active (same pattern as shapes)
