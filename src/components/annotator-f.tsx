@@ -42,7 +42,31 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
   useEffect(() => {
     const vv = window.visualViewport
     if (!vv) return
-    const update = () => setViewportHeight(vv.height)
+    let naturalHeight = vv.height
+    const update = () => {
+      setViewportHeight(vv.height)
+      // Keyboard appeared (viewport shrank significantly) → scroll active textbox into view
+      const canvas = a.fabricRef.current
+      if (!canvas) return
+      const isKeyboardOpen = vv.height < naturalHeight - 100
+      if (isKeyboardOpen) {
+        const obj = canvas.getActiveObject() as any
+        if (obj && (obj.type === 'i-text' || obj.type === 'textbox') && obj.isEditing) {
+          const zoom = canvas.getZoom()
+          const vp = canvas.viewportTransform as [number,number,number,number,number,number]
+          // World-space center of the text object
+          const objCenterY = (obj.top ?? 0) * zoom + vp[5]
+          // Target: place the text 40px above the keyboard top
+          const targetY = vv.height - 40
+          if (objCenterY > targetY) {
+            vp[5] -= (objCenterY - targetY)
+            canvas.setViewportTransform(vp)
+            canvas.renderAll()
+          }
+        }
+      }
+      naturalHeight = isKeyboardOpen ? naturalHeight : vv.height
+    }
     update()
     vv.addEventListener('resize', update)
     vv.addEventListener('scroll', update)
@@ -53,26 +77,43 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    let startDist = 0, startZoom = 1, pinchMidX = 0, pinchMidY = 0
+    let startDist = 0, startZoom = 1
+    let startMidX = 0, startMidY = 0
+    let lastMidX = 0, lastMidY = 0
+    let startVpX = 0, startVpY = 0
     const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+    const mid = (t: TouchList) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 })
     const onStart = (e: TouchEvent) => {
       if (e.touches.length !== 2) return
       e.preventDefault(); e.stopPropagation()
+      const canvas = a.fabricRef.current; if (!canvas) return
       startDist = dist(e.touches)
-      startZoom = a.fabricRef.current?.getZoom() ?? 1
-      pinchMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2
-      pinchMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+      startZoom = canvas.getZoom()
+      const m = mid(e.touches)
+      startMidX = m.x; startMidY = m.y; lastMidX = m.x; lastMidY = m.y
+      const vp = canvas.viewportTransform as [number,number,number,number,number,number]
+      startVpX = vp[4]; startVpY = vp[5]
     }
     const onMove = (e: TouchEvent) => {
       if (e.touches.length !== 2 || !startDist) return
       e.preventDefault(); e.stopPropagation()
-      const newZoom = Math.max(0.3, Math.min(8, startZoom * (dist(e.touches) / startDist)))
-      const canvas = a.fabricRef.current
-      if (canvas) {
-        const rect = container.getBoundingClientRect()
-        canvas.zoomToPoint(new fabric.Point(pinchMidX - rect.left, pinchMidY - rect.top), newZoom)
-        canvas.renderAll()
-      }
+      const canvas = a.fabricRef.current; if (!canvas) return
+      const rect = container.getBoundingClientRect()
+      const newDist = dist(e.touches)
+      const newZoom = Math.max(0.3, Math.min(8, startZoom * (newDist / startDist)))
+      const m = mid(e.touches)
+      // Pan delta from start position
+      const panDX = m.x - startMidX
+      const panDY = m.y - startMidY
+      // Zoom around the initial pinch midpoint, then offset by pan
+      const zoomPoint = new fabric.Point(startMidX - rect.left, startMidY - rect.top)
+      canvas.zoomToPoint(zoomPoint, newZoom)
+      const vp = canvas.viewportTransform as [number,number,number,number,number,number]
+      vp[4] = startVpX + panDX * newZoom / startZoom + panDX
+      vp[5] = startVpY + panDY * newZoom / startZoom + panDY
+      canvas.setViewportTransform(vp)
+      lastMidX = m.x; lastMidY = m.y
+      canvas.renderAll()
     }
     const onEnd = (e: TouchEvent) => { if (e.touches.length < 2) startDist = 0 }
     container.addEventListener('touchstart', onStart, { passive: false, capture: true })
@@ -252,7 +293,7 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
         {/* Damage slider — shown when toggled from actions row */}
         {showDamage && (
           <div className="flex items-center gap-3 px-4 border-b border-zinc-800/60" style={{ height: 44 }}>
-            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-12">Damage</span>
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-28">Damage Visibility</span>
             <input type="range" min={0} max={100} value={damageVisibility}
               onChange={(e) => handleDamageSlider(parseInt(e.target.value))}
               className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer accent-orange-500 bg-zinc-700" />
@@ -273,7 +314,7 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
             <button onClick={() => { setShowDamage(s => !s); setShowMore(false) }}
               className={`h-12 px-3 rounded-xl flex items-center gap-1.5 text-xs font-medium transition-colors ${showDamage ? 'bg-orange-600/20 text-orange-400' : 'text-zinc-400 active:bg-zinc-800'}`}>
               <Eye size={16} />
-              <span>Damage</span>
+              <span>Damage Visibility</span>
             </button>
             <button onClick={() => { setShowMore(s => !s); setShowDamage(false) }}
               className={`w-12 h-12 rounded-xl flex items-center justify-center text-xs font-medium transition-colors ${showMore ? 'bg-zinc-700 text-white' : 'text-zinc-400 active:bg-zinc-800'}`}>
