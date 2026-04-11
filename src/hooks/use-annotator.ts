@@ -7,7 +7,7 @@ import * as fabric from 'fabric'
 // Types & constants
 // ---------------------------------------------------------------------------
 
-export type Tool = 'select' | 'arrow' | 'line' | 'circle' | 'rectangle' | 'text'
+export type Tool = 'select' | 'arrow' | 'line' | 'circle' | 'rectangle' | 'text' | 'callout'
 export type ColorMode = 'stroke' | 'fill' | 'text'
 export type SelectedType = 'text' | 'shape' | 'none'
 export type SelectedSubType = 'text' | 'line' | 'fillable' | 'none'
@@ -31,7 +31,12 @@ const DEFAULT_STROKE = 6
 const MAX_HISTORY = 40
 
 // Custom properties to persist through JSON serialization
-const CUSTOM_PROPS = ['_boxStroke', '_boxStrokeWidth', 'isLegend', 'isLegendBg', 'legendColor', '_legendScale', '_isArrow']
+const CUSTOM_PROPS = [
+  '_boxStroke', '_boxStrokeWidth', 'isLegend', 'isLegendBg', 'isLegendSwatch', 'isLegendX',
+  'legendColor', '_legendScale', '_legendWidth', '_isArrow',
+  '_calloutId', '_isCalloutAnchor', '_isCalloutBubble', '_isCalloutLine',
+  '_calloutZoom', '_calloutAnchorX', '_calloutAnchorY', '_calloutRadius', '_zoomHandleY',
+]
 
 function makeShadow() {
   return new fabric.Shadow({ color: 'rgba(0,0,0,0.92)', blur: 20, offsetX: 4, offsetY: 4 })
@@ -54,18 +59,13 @@ function extractHex(color: string | undefined | null): string {
   return `#${h(+m[1])}${h(+m[2])}${h(+m[3])}`.toUpperCase()
 }
 
-// Looks at stroke colors and (for non-text) fill colors
+// Only stroke colors drive the legend — fills and text colors are intentionally excluded
 function getUsedColors(canvas: fabric.Canvas): string[] {
   const used: string[] = []
   const found = new Set<string>()
   canvas.getObjects().forEach((obj: any) => {
-    if (obj.isLegend) return
+    if (obj.isLegend || obj._isCalloutAnchor || obj._isCalloutBubble || obj._isCalloutLine) return
     const sources: (string | undefined)[] = [obj.stroke, obj._boxStroke]
-    // Include fill for shapes (not text characters, not transparent)
-    const isText = obj.type === 'i-text' || obj.type === 'textbox'
-    if (!isText && typeof obj.fill === 'string' && obj.fill !== 'transparent' && obj.fill !== '') {
-      sources.push(obj.fill)
-    }
     sources.forEach((src) => {
       const hex = extractHex(src)
       if (!hex) return
@@ -133,7 +133,6 @@ function renderEndpointHandle(ctx: CanvasRenderingContext2D, left: number, top: 
 }
 
 // Replaces default Fabric controls on a Line with endpoint-only drag handles.
-// Dragging an endpoint moves that point; dragging the line body moves the whole line.
 function applyLineEndpointControls(line: fabric.Line) {
   const makeEndpointControl = (which: 'p1' | 'p2') =>
     new fabric.Control({
@@ -196,15 +195,181 @@ function applyArrowRenderer(line: fabric.Line) {
 function applyLineControlsToAll(canvas: fabric.Canvas) {
   canvas.getObjects().forEach((obj: any) => {
     if (obj.type === 'line') {
-      obj.objectCaching = false  // keep caching off so _render override always runs
+      obj.objectCaching = false
       applyLineEndpointControls(obj as fabric.Line)
       if (obj._isArrow) { applyArrowRenderer(obj as fabric.Line); obj.dirty = true }
     }
   })
 }
 
+// ---------------------------------------------------------------------------
+// Callout helpers
+// ---------------------------------------------------------------------------
+
+function genId(): string {
+  return Math.random().toString(36).slice(2, 9)
+}
+
+// Updates the connector line endpoints based on current anchor and bubble positions
+function updateCalloutConnector(canvas: fabric.Canvas, calloutId: string) {
+  const anchor = canvas.getObjects().find((o: any) => o._calloutId === calloutId && o._isCalloutAnchor) as any
+  const bubble = canvas.getObjects().find((o: any) => o._calloutId === calloutId && o._isCalloutBubble) as any
+  const line = canvas.getObjects().find((o: any) => o._calloutId === calloutId && o._isCalloutLine) as any
+  if (!anchor || !bubble || !line) return
+  const ax = anchor.left ?? 0, ay = anchor.top ?? 0
+  const bx = bubble.left ?? 0, by = bubble.top ?? 0
+  const dx = ax - bx, dy = ay - by
+  const dist = Math.sqrt(dx * dx + dy * dy)
+  const r = bubble.radius ?? 60
+  const edgeX = dist > 0.5 ? bx + (dx / dist) * r : bx + r
+  const edgeY = dist > 0.5 ? by + (dy / dist) * r : by
+  line.set({ x1: ax, y1: ay, x2: edgeX, y2: edgeY })
+  line.setCoords()
+}
+
+// Applies the zoomed-image _render override and custom resize/zoom controls to a callout bubble
+function applyCalloutBubbleRenderer(bubble: any, canvas: fabric.Canvas) {
+  if (bubble._calloutRendererApplied) return
+  bubble._fabricCanvas = canvas
+  bubble.objectCaching = false
+
+  // Override _render: draw circular zoomed crop of base image centered on anchor
+  bubble._render = function (this: any, ctx: CanvasRenderingContext2D) {
+    const r: number = this.radius ?? 60
+    const bg = this._fabricCanvas?.backgroundImage
+    let drawn = false
+    if (bg) {
+      const bgEl = (bg as any).getElement?.() || (bg as any)._element
+      if (bgEl && (bgEl.naturalWidth || bgEl.width)) {
+        const imgW: number = bgEl.naturalWidth || bgEl.width
+        const imgH: number = bgEl.naturalHeight || bgEl.height
+        const bgScaleX: number = bg.scaleX ?? 1
+        const bgScaleY: number = bg.scaleY ?? bgScaleX
+        const bgLeft: number = bg.left ?? 0
+        const bgTop: number = bg.top ?? 0
+        const ax: number = this._calloutAnchorX ?? this.left
+        const ay: number = this._calloutAnchorY ?? this.top
+        // Map anchor world coords → image pixel coords (bg uses center origin)
+        const imgX = (ax - bgLeft) / bgScaleX + imgW / 2
+        const imgY = (ay - bgTop) / bgScaleY + imgH / 2
+        const zoomLevel: number = this._calloutZoom ?? 2
+        // Source rect half-size in image pixels: bubble radius / (bgScale * zoom)
+        const srcR = r / (bgScaleX * zoomLevel)
+        const sx = Math.max(0, imgX - srcR)
+        const sy = Math.max(0, imgY - srcR)
+        const sw = Math.min(imgW - sx, srcR * 2)
+        const sh = Math.min(imgH - sy, srcR * 2)
+        if (sw > 0 && sh > 0) {
+          ctx.save()
+          ctx.beginPath()
+          ctx.arc(0, 0, r, 0, Math.PI * 2)
+          ctx.clip()
+          ctx.drawImage(bgEl, sx, sy, sw, sh, -r, -r, r * 2, r * 2)
+          ctx.restore()
+          drawn = true
+        }
+      }
+    }
+    if (!drawn) {
+      // Placeholder when no image available
+      ctx.save()
+      ctx.fillStyle = 'rgba(60,60,60,0.7)'
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill()
+      ctx.restore()
+    }
+    // Thin black border
+    ctx.save()
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2)
+    ctx.strokeStyle = '#000000'; ctx.lineWidth = 2; ctx.stroke()
+    ctx.restore()
+  }
+
+  // Blue handle: drag to resize bubble radius (positioned at right edge)
+  const resizeControl = new fabric.Control({
+    positionHandler: (dim: any, finalMatrix: any) => {
+      return new fabric.Point(dim.x, 0).transform(finalMatrix)
+    },
+    actionHandler: (_evt: any, transform: any, x: number, y: number) => {
+      const b = transform.target as any
+      const center = new fabric.Point(b.left as number, b.top as number)
+      const newR = Math.max(20, Math.round(center.distanceFrom(new fabric.Point(x, y))))
+      b.set({ radius: newR })
+      b._calloutRadius = newR
+      b.dirty = true; b.setCoords()
+      updateCalloutConnector(b._fabricCanvas, b._calloutId)
+      b._fabricCanvas?.renderAll()
+      return true
+    },
+    cursorStyle: 'ew-resize',
+    actionName: 'resizeBubble',
+    render: (ctx: CanvasRenderingContext2D, left: number, top: number) => {
+      ctx.save()
+      ctx.fillStyle = '#3B82F6'; ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2
+      ctx.beginPath(); ctx.arc(left, top, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+      ctx.restore()
+    },
+    sizeX: 14, sizeY: 14,
+  })
+
+  // Green handle: drag away from bubble to zoom in, drag toward edge to zoom out
+  // Position encodes zoom: offset = 20 * zoomLevel (40px = 2x, 80px = 4x, etc.)
+  const zoomControl = new fabric.Control({
+    positionHandler: (dim: any, finalMatrix: any, obj: any) => {
+      const offset: number = (obj as any)._zoomHandleY ?? 40
+      return new fabric.Point(0, -(dim.y + offset)).transform(finalMatrix)
+    },
+    actionHandler: (_evt: any, transform: any, x: number, y: number) => {
+      const b = transform.target as any
+      const center = new fabric.Point(b.left as number, b.top as number)
+      const dist = center.distanceFrom(new fabric.Point(x, y))
+      const offset = Math.max(10, Math.round(dist - (b.radius ?? 60)))
+      b._zoomHandleY = offset
+      b._calloutZoom = Math.max(0.5, Math.min(10, offset / 20))
+      b.dirty = true
+      b._fabricCanvas?.renderAll()
+      return true
+    },
+    cursorStyle: 'ns-resize',
+    actionName: 'zoomBubble',
+    render: (ctx: CanvasRenderingContext2D, left: number, top: number) => {
+      ctx.save()
+      ctx.fillStyle = '#22C55E'; ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2
+      ctx.beginPath(); ctx.arc(left, top, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+      ctx.restore()
+    },
+    sizeX: 14, sizeY: 14,
+  })
+
+  bubble.controls = { resize: resizeControl, zoom: zoomControl }
+  bubble.hasBorders = true
+  bubble._calloutRendererApplied = true
+}
+
+// Re-applies callout renderers/controls after load from JSON (canvas reference not serialized)
+function applyCalloutControlsToAll(canvas: fabric.Canvas) {
+  canvas.getObjects().forEach((obj: any) => {
+    if (obj._isCalloutBubble) {
+      obj._fabricCanvas = canvas
+      obj.objectCaching = false
+      if (!obj._calloutRendererApplied) applyCalloutBubbleRenderer(obj, canvas)
+      obj.dirty = true
+    }
+    if (obj._isCalloutLine) {
+      obj.selectable = false; obj.evented = false
+    }
+    if (obj._isCalloutAnchor) {
+      obj.visible = false // always hidden until selected
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Legend layout helpers
+// ---------------------------------------------------------------------------
+
 // Re-measures actual Textbox heights and repositions all legend rows + resizes bg.
-// Pass newWidth to also resize label wrap width (on horizontal drag resize).
+// Pass newBgWidth to also resize label wrap width (on horizontal drag resize).
+// Height is always recomputed from content (font size drives height, not vice versa).
 function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
   const bg = canvas.getObjects().find((o: any) => o.isLegendBg) as any
   if (!bg) return
@@ -213,17 +378,15 @@ function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
   const swatchSz = Math.round(18 * s), xBtnSize = Math.round(16 * s)
   const rowPad = Math.round(8 * s), labelGap = Math.round(10 * s)
   const y = bg.top as number
-  const bgW = newBgWidth ?? (bg.width as number)
+  const clampedW = newBgWidth !== undefined ? Math.max(120, newBgWidth) : undefined
+  const bgW = clampedW ?? (bg.width as number)
 
-  // If new width supplied, bake it into the bg rect (reset scale)
-  if (newBgWidth !== undefined) {
-    bg.set({ width: newBgWidth, scaleX: 1 }); bg.setCoords()
+  if (clampedW !== undefined) {
+    bg.set({ width: clampedW, scaleX: 1 }); bg.setCoords()
+    ;(bg as any)._legendWidth = clampedW
   }
 
-  // Recompute label wrap width from current bg width
   const labelW = bgW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
-
-  // Labels in canvas insertion order (which matches colors order)
   const labels = canvas.getObjects().filter((o: any) =>
     o.isLegend && (o.type === 'textbox' || o.type === 'i-text') && o.legendColor && !o.isLegendX
   ) as any[]
@@ -233,24 +396,20 @@ function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
     const color = label.legendColor
     const swatch = canvas.getObjects().find((o: any) => o.isLegendSwatch && o.legendColor === color) as any
     const xBtn = canvas.getObjects().find((o: any) => o.isLegendX && o.legendColor === color) as any
-    // Update label width if horizontal resize changed it
-    if (newBgWidth !== undefined && Math.abs(label.width - labelW) > 1) {
+    if (clampedW !== undefined && Math.abs(label.width - labelW) > 1) {
       label.set({ width: labelW }); label.initDimensions()
     }
     const labelH = label.height ?? swatchSz
     const rowH = Math.max(swatchSz, labelH) + rowPad
-    // Swatch top-aligns with first line of text
     if (swatch) { swatch.set({ top: curY, left: bg.left + pad }); swatch.setCoords() }
     label.set({ top: curY, left: bg.left + pad + swatchSz + labelGap }); label.setCoords()
     if (xBtn) { xBtn.set({ top: curY, left: bg.left + bgW - pad - xBtnSize }); xBtn.setCoords() }
     curY += rowH
   })
 
-  // Resize bg height to fit content; also update LEGEND title position
   const newH = (curY - y) + Math.round(pad / 2)
   bg.set({ height: newH, scaleY: 1 }); bg.setCoords()
 
-  // Update LEGEND title left in case width changed
   const title = canvas.getObjects().find((o: any) => o.isLegend && !o.legendColor && !o.isLegendBg && !o.isLegendX) as any
   if (title) { title.set({ left: bg.left + pad, top: y + pad - 2 }); title.setCoords() }
 
@@ -323,7 +482,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const onKeyRef = useRef<((e: KeyboardEvent) => void) | null>(null)
   const legendLabelsRef = useRef<Record<string, string>>({})
   const legendExcludedColorsRef = useRef<Set<string>>(new Set())
-  const legendResizingRef = useRef(false)  // guard against double-fire during resize
+  const legendResizingRef = useRef(false)
   const copiedRef = useRef<fabric.FabricObject | null>(null)
 
   // Stable refs so canvas event handlers (defined once) can call latest versions
@@ -352,7 +511,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     if (!c || idx < 0 || idx >= historyRef.current.length) return
     loadingHistoryRef.current = true; hIdxRef.current = idx
     c.loadFromJSON(JSON.parse(historyRef.current[idx])).then(() => {
-      applyBoxStrokeToAll(c); applyLineControlsToAll(c)
+      applyBoxStrokeToAll(c); applyLineControlsToAll(c); applyCalloutControlsToAll(c)
       c.renderAll(); loadingHistoryRef.current = false; syncButtons()
     })
   }, [syncButtons])
@@ -369,7 +528,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     if (tool === 'select') {
       c.selection = true; (c as any).skipTargetFind = false; c.defaultCursor = 'default'; c.hoverCursor = 'move'
     } else {
-      // skipTargetFind = true: drawing tools can't accidentally interact with existing objects
       c.selection = false; (c as any).skipTargetFind = true
       c.discardActiveObject(); c.defaultCursor = 'crosshair'; c.hoverCursor = 'crosshair'; c.renderAll()
     }
@@ -491,7 +649,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const c = fabricRef.current; if (!c || !copiedRef.current) return
     ;(copiedRef.current as any).clone().then((cloned: fabric.FabricObject) => {
       finalizeClone(cloned, c)
-      // Re-clone so paste again works
       ;(copiedRef.current as any).clone().then((next: fabric.FabricObject) => {
         next.set({ left: (next.left ?? 0) + 20, top: (next.top ?? 0) + 20 })
         copiedRef.current = next
@@ -563,12 +720,18 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const deleteSelected = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     const objs = c.getActiveObjects(); if (!objs.length) return
-    // If the legend background is selected, delete the entire legend
     const deletingLegendBg = objs.some((o: any) => o.isLegendBg)
+    // Collect callout IDs to delete entire callout group when any part is deleted
+    const calloutIdsToDelete = new Set<string>()
+    objs.forEach((o: any) => { if (o._calloutId) calloutIdsToDelete.add(o._calloutId) })
     if (deletingLegendBg) {
       c.getObjects().filter((o: any) => o.isLegend).forEach((o) => c.remove(o))
     } else {
       objs.forEach((o) => c.remove(o))
+      // Remove all remaining parts of any callout whose part was deleted
+      calloutIdsToDelete.forEach(id => {
+        c.getObjects().filter((o: any) => o._calloutId === id).forEach((o) => c.remove(o))
+      })
     }
     c.discardActiveObject(); c.renderAll(); saveHistory()
     maybeUpdateLegendRef.current()
@@ -613,21 +776,21 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const saveLegendLabels = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     c.getObjects().forEach((o: any) => {
-      // Exclude X buttons (type 'text' / FabricText) — they contain '✕' not a label
       if (o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch &&
           (o.type === 'i-text' || o.type === 'textbox' || o.type === 'text'))
         legendLabelsRef.current[o.legendColor] = o.text || 'edit'
     })
   }, [])
 
-  const buildLegend = useCallback((colors: string[], position?: { x: number; y: number }, scale = 1) => {
+  const buildLegend = useCallback((colors: string[], position?: { x: number; y: number }, scale = 1, fixedWidth?: number) => {
     const c = fabricRef.current; if (!c) return
     c.getObjects().filter((o: any) => o.isLegend).forEach((o) => c.remove(o))
     const s = Math.max(0.25, scale)
     const pad = Math.round(14 * s), swatchSz = Math.round(18 * s)
     const labelGap = Math.round(10 * s), titleH = Math.round(28 * s)
     const xBtnSize = Math.round(16 * s), rowPad = Math.round(8 * s)
-    const totalW = Math.round(220 * s)
+    const defaultW = Math.round(220 * s)
+    const totalW = fixedWidth !== undefined ? Math.max(120, fixedWidth) : defaultW
     const maxLabelW = totalW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
     const fontSize = Math.round(15 * s)
 
@@ -635,14 +798,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       const emptyH = pad * 2 + Math.round(60 * s)
       const x = position?.x ?? (c.width! - totalW) / 2, y = position?.y ?? (c.height! - emptyH) / 2
       const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: emptyH, fill: 'rgba(0,0,0,0.8)', rx: Math.round(8 * s), ry: Math.round(8 * s), stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
-      ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; c.add(bg)
+      ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; (bg as any)._legendWidth = totalW; c.add(bg)
       const hint = new fabric.FabricText('Add an element to\nbuild the legend.', { left: x + pad, top: y + pad, fontFamily: 'Arial, sans-serif', fontSize: Math.round(12 * s), fill: 'rgba(255,255,255,0.45)', selectable: false, evented: false })
       ;(hint as any).isLegend = true; c.add(hint)
       c.renderAll(); return
     }
 
     // --- Two-pass layout: measure Textbox heights first, then place everything ---
-    // Pass 1: create all Textboxes off-screen to measure their wrapped height
     const labelTexts = colors.map(color => legendLabelsRef.current[color] || 'edit')
     const tempLabels = labelTexts.map(text => {
       const tb = new fabric.Textbox(text, {
@@ -659,17 +821,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const totalH = pad + titleH + rowHeights.reduce((a, b) => a + b, 0) + Math.round(pad / 2)
     const x = position?.x ?? (c.width! - totalW) / 2, y = position?.y ?? (c.height! - totalH) / 2
 
-    // Background box — height calculated from actual content
     const bg = new fabric.Rect({ left: x, top: y, width: totalW, height: totalH, fill: 'rgba(0,0,0,0.8)', rx: Math.round(8 * s), ry: Math.round(8 * s), stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, shadow: makeShadow(), selectable: true, evented: true, hoverCursor: 'move' })
-    ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; c.add(bg)
+    ;(bg as any).isLegend = true; (bg as any).isLegendBg = true; (bg as any)._legendScale = s; (bg as any)._legendWidth = totalW; c.add(bg)
     const title = new fabric.FabricText('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: Math.round(13 * s), fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
     ;(title as any).isLegend = true; c.add(title)
 
-    // Pass 2: place rows using measured heights — swatch top-aligns with first text line
     let curY = y + pad + titleH
     colors.forEach((color, i) => {
       const rowH = rowHeights[i]
-      // Swatch top = curY (same as label top) so first text line aligns with swatch
       const sw = new fabric.Rect({ left: x + pad, top: curY, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
       ;(sw as any).isLegend = true; (sw as any).isLegendSwatch = true; (sw as any).legendColor = color; c.add(sw)
       const label = new fabric.Textbox(labelTexts[i], {
@@ -691,7 +850,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     c.renderAll()
   }, [])
 
-  // Toggle: if legend exists → remove it. If not → create it (starts empty, fills as shapes are added).
   const createLegend = useCallback(() => {
     const c = fabricRef.current; if (!c) return
     const existingBg = c.getObjects().find((o: any) => o.isLegendBg)
@@ -700,13 +858,12 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       c.renderAll(); saveHistory(); return
     }
     saveLegendLabels()
-    legendExcludedColorsRef.current = new Set() // reset exclusions when re-opening
+    legendExcludedColorsRef.current = new Set()
     const usedColors = getUsedColors(c)
     buildLegend(usedColors)
     saveHistory(); changeTool('select')
   }, [buildLegend, saveLegendLabels, saveHistory, changeTool])
 
-  // Remove a single color row from the legend (user taps X)
   const removeLegendColor = useCallback((color: string) => {
     const c = fabricRef.current; if (!c) return
     legendExcludedColorsRef.current.add(color)
@@ -715,7 +872,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     saveLegendLabels()
     const usedColors = getUsedColors(c).filter(clr => !legendExcludedColorsRef.current.has(clr))
     const currentScale = (existingBg as any)._legendScale ?? 1
-    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! }, currentScale)
+    const currentWidth = (existingBg as any)._legendWidth
+    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! }, currentScale, currentWidth)
     saveHistory()
   }, [buildLegend, saveLegendLabels, saveHistory])
 
@@ -725,15 +883,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     saveLegendLabels()
     const usedColors = getUsedColors(c).filter(clr => !legendExcludedColorsRef.current.has(clr))
     const cur = [...new Set(c.getObjects().filter((o: any) => o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch).map((o: any) => o.legendColor as string))]
-    // Rebuild if colors differ in any way
     const same = usedColors.length === cur.length && usedColors.every((clr) => cur.includes(clr))
     if (same) return
     const currentScale = (existingBg as any)._legendScale ?? 1
-    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! }, currentScale)
+    const currentWidth = (existingBg as any)._legendWidth
+    buildLegend(usedColors, { x: existingBg.left!, y: existingBg.top! }, currentScale, currentWidth)
     saveHistory()
   }, [buildLegend, saveLegendLabels, saveHistory])
 
-  // Keep refs in sync so canvas event handlers call latest versions
   maybeUpdateLegendRef.current = maybeUpdateLegend
   removeLegendColorRef.current = removeLegendColor
 
@@ -747,13 +904,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       const w = container.clientWidth, h = container.clientHeight
       if (w === 0 || h === 0) return
       const canvas = new fabric.Canvas(el, { width: w, height: h, backgroundColor: '#18181b', selection: true, preserveObjectStacking: true })
-      // Free corner-scaling by default; hold Shift to lock aspect ratio
       canvas.uniformScaling = false
       fabricRef.current = canvas
 
       if (initialState) {
         canvas.loadFromJSON(JSON.parse(initialState)).then(() => {
-          applyBoxStrokeToAll(canvas); applyLineControlsToAll(canvas); canvas.renderAll(); saveHistory()
+          applyBoxStrokeToAll(canvas); applyLineControlsToAll(canvas); applyCalloutControlsToAll(canvas)
+          canvas.renderAll(); saveHistory()
         }).catch((e: any) => console.error('Load failed:', e))
       } else if (imageUrl && imageUrl !== '__saved__') {
         const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
@@ -782,15 +939,12 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           }
           return
         }
-        // Determine if this is a line/arrow (line object with _isArrow or plain line — no fill option)
         const isLine = obj.type === 'line'
         setSelectedType('shape')
         setSelectedSubType(isLine ? 'line' : 'fillable')
-        // Lines/arrows always use stroke mode
         if (isLine || colorModeRef.current === 'text') {
           setColorMode('stroke'); colorModeRef.current = 'stroke'
         }
-        // Sync isFilled / isStroked from object
         const objFill = (obj as any).fill
         const hasFill = !isLine && objFill && objFill !== 'transparent' && objFill !== ''
         setIsFilled(!!hasFill); isFilledRef.current = !!hasFill
@@ -799,7 +953,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         setIsStroked(!!hasStroke); isStrokedRef.current = !!hasStroke
       }
 
-      // Mouse
+      // --- Drawing mouse:down (tool-specific shape creation) ---
       canvas.on('mouse:down', (opt) => {
         const tool = activeToolRef.current, color = activeColorRef.current
         if (tool === 'select') return
@@ -816,6 +970,51 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           applyBoxStrokeRenderer(txt as any)
           canvas.add(txt); canvas.setActiveObject(txt); (txt as fabric.IText).enterEditing(); return
         }
+
+        if (tool === 'callout') {
+          const id = genId()
+          const bubbleR = 60
+          const bubbleX = pointer.x + 130
+          const bubbleY = pointer.y - 90
+          // Connector from anchor to bubble edge
+          const dx = pointer.x - bubbleX, dy = pointer.y - bubbleY
+          const dist = Math.sqrt(dx * dx + dy * dy)
+          const edgeX = dist > 0.5 ? bubbleX + (dx / dist) * bubbleR : bubbleX + bubbleR
+          const edgeY = dist > 0.5 ? bubbleY + (dy / dist) * bubbleR : bubbleY
+          const connLine = new fabric.Line([pointer.x, pointer.y, edgeX, edgeY], {
+            stroke: '#000000', strokeWidth: 1.5, selectable: false, evented: false, objectCaching: false,
+          })
+          ;(connLine as any)._calloutId = id; (connLine as any)._isCalloutLine = true
+          canvas.add(connLine)
+          // Bubble (zoomed crop circle)
+          const bubble = new fabric.Circle({
+            left: bubbleX, top: bubbleY, radius: bubbleR,
+            fill: 'rgba(60,60,60,0.5)', stroke: '#000000', strokeWidth: 2,
+            originX: 'center', originY: 'center', objectCaching: false,
+          })
+          ;(bubble as any)._calloutId = id; (bubble as any)._isCalloutBubble = true
+          ;(bubble as any)._calloutZoom = 2; (bubble as any)._zoomHandleY = 40
+          ;(bubble as any)._calloutAnchorX = pointer.x; (bubble as any)._calloutAnchorY = pointer.y
+          ;(bubble as any)._calloutRadius = bubbleR
+          applyCalloutBubbleRenderer(bubble as any, canvas)
+          canvas.add(bubble)
+          // Anchor (thin hollow circle, shown when callout selected)
+          const anchor = new fabric.Circle({
+            left: pointer.x, top: pointer.y, radius: 8,
+            fill: 'transparent', stroke: '#000000', strokeWidth: 1.5,
+            originX: 'center', originY: 'center', visible: false,
+            hasControls: false, hasBorders: false, hoverCursor: 'move',
+          })
+          ;(anchor as any)._calloutId = id; (anchor as any)._isCalloutAnchor = true
+          canvas.add(anchor)
+          anchor.visible = true // show since bubble is about to be selected
+          canvas.setActiveObject(bubble)
+          applySelectMode(canvas, setActiveTool, activeToolRef)
+          canvas.renderAll()
+          saveHistory()
+          return
+        }
+
         isDrawingRef.current = true; startRef.current = { x: pointer.x, y: pointer.y }
         const sw = strokeWidthRef.current
         const strokeColor = hexToRgba(color, strokeOpacityRef.current)
@@ -865,7 +1064,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           else if (shape.type === 'line') { const l = shape as fabric.Line; len = Math.sqrt(((l.x2 ?? 0) - (l.x1 ?? 0)) ** 2 + ((l.y2 ?? 0) - (l.y1 ?? 0)) ** 2) }
           if (len < 4) { canvas.remove(shape) }
           else if (tool === 'arrow') {
-            // objectCaching=false (set at creation) ensures _render override is always called, not a stale cache
             ;(shape as any)._isArrow = true
             applyArrowRenderer(shape as fabric.Line)
             applyLineEndpointControls(shape as fabric.Line)
@@ -876,8 +1074,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
             shape.setCoords(); canvas.setActiveObject(shape); saveHistory()
           }
         }
-        // Keep drawing tool active — re-enable selection so the placed shape has handles
-        // but keep skipTargetFind=true so the tool doesn't accidentally select on next click
         canvas.selection = true; (canvas as any).skipTargetFind = true
         canvas.defaultCursor = 'crosshair'
         maybeUpdateLegendRef.current()
@@ -902,6 +1098,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         } else {
           setLegendPickerColor(null)
         }
+        // Show anchor when any part of this callout is selected
+        if (obj?._calloutId) {
+          const cid = obj._calloutId
+          canvas.getObjects().forEach((o: any) => {
+            if (o._calloutId === cid && o._isCalloutAnchor) { o.visible = true; o.setCoords() }
+          })
+          canvas.renderAll()
+        }
       })
       canvas.on('selection:updated', (opt: any) => {
         setHasSelection(true); syncSelectedType()
@@ -915,11 +1119,21 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         } else {
           setLegendPickerColor(null)
         }
+        if (obj?._calloutId) {
+          const cid = obj._calloutId
+          canvas.getObjects().forEach((o: any) => {
+            if (o._calloutId === cid && o._isCalloutAnchor) { o.visible = true; o.setCoords() }
+          })
+          canvas.renderAll()
+        }
       })
       canvas.on('selection:cleared', () => {
         setHasSelection(false); setSelectedType('none'); setLegendPickerColor(null)
         canvas.uniformScaling = false
         setXBtnsVisible(false)
+        // Hide all callout anchors when deselected
+        canvas.getObjects().forEach((o: any) => { if (o._isCalloutAnchor) o.visible = false })
+        canvas.renderAll()
       })
 
       // Shift-key rotation snapping to 30° intervals
@@ -930,42 +1144,112 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         }
       })
 
-      // While scaling the legend bg, show a live preview by relaying out children
+      // Live preview of legend resize during drag
       canvas.on('object:scaling', (opt: any) => {
         const obj = opt.target as any
         if (!obj?.isLegendBg || legendResizingRef.current) return
-        const newW = Math.round((obj.width as number) * (obj.scaleX as number))
         legendResizingRef.current = true
-        relayoutLegend(canvas, newW)
+
+        const rawW = Math.round((obj.width as number) * (obj.scaleX as number))
+        const newW = Math.max(120, rawW)
+        const scaleYChanged = Math.abs((obj.scaleY as number) - 1) > 0.01
+
+        if (scaleYChanged) {
+          // Vertical resize: recompute font scale from new height, rebuild legend
+          const newH = Math.round((obj.height as number) * (obj.scaleY as number))
+          const legendLabels = canvas.getObjects().filter((o: any) =>
+            o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch &&
+            (o.type === 'textbox' || o.type === 'i-text')
+          ) as any[]
+          const N = Math.max(1, legendLabels.length)
+          // Approximate: totalH ≈ s*(49 + 26*N) for N single-line rows
+          const newS = Math.max(0.25, newH / (49 + 26 * N))
+          saveLegendLabels()
+          const usedColors = legendLabels.map((o: any) => o.legendColor as string)
+          buildLegend(usedColors, { x: obj.left as number, y: obj.top as number }, newS, newW)
+        } else {
+          // Horizontal only: relayout without changing font scale
+          relayoutLegend(canvas, newW)
+        }
+
         legendResizingRef.current = false
       })
 
       canvas.on('object:modified', (opt: any) => {
         if (legendResizingRef.current) return
         const obj = opt.target as any
+
         if (obj?.isLegendBg && (obj.scaleX !== 1 || obj.scaleY !== 1)) {
           legendResizingRef.current = true
-          // Bake scale into actual pixel dimensions — keep font sizes unchanged
-          const newW = Math.round((obj.width as number) * (obj.scaleX as number))
-          // Height is managed by relayoutLegend from content — ignore scaleY
-          obj.set({ width: newW, scaleX: 1, scaleY: 1 }); obj.setCoords()
-          relayoutLegend(canvas, newW)
+          const rawW = Math.round((obj.width as number) * (obj.scaleX as number))
+          const newW = Math.max(120, rawW)
+          const scaleYChanged = Math.abs((obj.scaleY as number) - 1) > 0.01
+
+          if (scaleYChanged) {
+            const newH = Math.round((obj.height as number) * (obj.scaleY as number))
+            const legendLabels = canvas.getObjects().filter((o: any) =>
+              o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch &&
+              (o.type === 'textbox' || o.type === 'i-text')
+            ) as any[]
+            const N = Math.max(1, legendLabels.length)
+            const newS = Math.max(0.25, newH / (49 + 26 * N))
+            saveLegendLabels()
+            const usedColors = legendLabels.map((o: any) => o.legendColor as string)
+            buildLegend(usedColors, { x: obj.left as number, y: obj.top as number }, newS, newW)
+          } else {
+            obj.set({ width: newW, scaleX: 1, scaleY: 1 }); obj.setCoords()
+            relayoutLegend(canvas, newW)
+          }
           legendResizingRef.current = false
         }
+
+        // Callout: sync anchor position into bubble after any move/modify
+        const calloutIds = new Set<string>()
+        if ((obj as any)?._calloutId) calloutIds.add((obj as any)._calloutId)
+        if (obj?.type === 'activeselection') {
+          ;(obj as any).getObjects?.()?.forEach?.((o: any) => { if (o._calloutId) calloutIds.add(o._calloutId) })
+        }
+        calloutIds.forEach(id => {
+          const cAnchor = canvas.getObjects().find((o: any) => o._calloutId === id && o._isCalloutAnchor) as any
+          const cBubble = canvas.getObjects().find((o: any) => o._calloutId === id && o._isCalloutBubble) as any
+          if (cAnchor && cBubble) {
+            cBubble._calloutAnchorX = cAnchor.left
+            cBubble._calloutAnchorY = cAnchor.top
+            cBubble.dirty = true
+            updateCalloutConnector(canvas, id)
+          }
+        })
+
         saveHistory()
       })
 
       let legendDragStart: { x: number; y: number } | null = null
       canvas.on('object:moving', (opt) => {
-        const obj = opt.target as any; if (!obj?.isLegendBg) return
-        const dx = obj.left! - (legendDragStart?.x ?? obj.left!), dy = obj.top! - (legendDragStart?.y ?? obj.top!)
-        legendDragStart = { x: obj.left!, y: obj.top! }
-        canvas.getObjects().forEach((o: any) => { if (o.isLegend && o !== obj) { o.set({ left: o.left! + dx, top: o.top! + dy }); o.setCoords() } })
+        const obj = opt.target as any
+        // Legend drag: move all children with the bg
+        if (obj?.isLegendBg) {
+          const dx = obj.left! - (legendDragStart?.x ?? obj.left!), dy = obj.top! - (legendDragStart?.y ?? obj.top!)
+          legendDragStart = { x: obj.left!, y: obj.top! }
+          canvas.getObjects().forEach((o: any) => { if (o.isLegend && o !== obj) { o.set({ left: o.left! + dx, top: o.top! + dy }); o.setCoords() } })
+        }
+        // Callout: anchor moved alone → update bubble crop reference + connector
+        if (obj?._isCalloutAnchor) {
+          const cBubble = canvas.getObjects().find((o: any) => o._calloutId === obj._calloutId && o._isCalloutBubble) as any
+          if (cBubble) { cBubble._calloutAnchorX = obj.left; cBubble._calloutAnchorY = obj.top; cBubble.dirty = true }
+          updateCalloutConnector(canvas, obj._calloutId)
+          canvas.renderAll()
+        } else if (obj?._isCalloutBubble) {
+          // Bubble moved alone → update connector only (crop stays centered on anchor)
+          updateCalloutConnector(canvas, obj._calloutId)
+          canvas.renderAll()
+        }
       })
+
+      // --- Interaction mouse:down (select mode: legend clicks, callout selection) ---
       canvas.on('mouse:down', (opt) => {
         const t = opt.target as any
         if (t?.isLegendBg) legendDragStart = { x: t.left!, y: t.top! }
-        // X button — remove that color row
+        // X button — remove that color row from legend
         if (t?.isLegendX && t?.legendColor) {
           removeLegendColorRef.current(t.legendColor)
           canvas.discardActiveObject(); canvas.renderAll()
@@ -973,9 +1257,24 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         }
         // Single click enters editing mode for legend text labels
         if (t?.isLegend && (t.type === 'i-text' || t.type === 'textbox')) {
-          canvas.setActiveObject(t)
-          ;(t as fabric.IText).enterEditing()
-          canvas.renderAll()
+          canvas.setActiveObject(t); (t as fabric.IText).enterEditing(); canvas.renderAll()
+        }
+        // Callout bubble clicked: select bubble + anchor as a unit
+        if (t?._isCalloutBubble && activeToolRef.current === 'select') {
+          const cid = t._calloutId
+          const cAnchor = canvas.getObjects().find((o: any) => o._calloutId === cid && o._isCalloutAnchor) as any
+          if (cAnchor) {
+            cAnchor.visible = true
+            const sel = new fabric.ActiveSelection([cAnchor, t], { canvas })
+            canvas.setActiveObject(sel)
+            canvas.renderAll()
+          }
+          return
+        }
+        // Callout anchor clicked: select just anchor (for repositioning)
+        if (t?._isCalloutAnchor) {
+          t.visible = true
+          canvas.setActiveObject(t); canvas.renderAll()
         }
       })
       canvas.on('mouse:up', () => { legendDragStart = null })
@@ -995,9 +1294,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           relayoutLegend(canvas)
         }
         saveHistory()
-        // Select the text object but keep the text tool active (same pattern as shapes)
         if (t && t.text?.trim() !== '') canvas.setActiveObject(t)
-        // Re-enable canvas selection so handles work, keep skipTargetFind=true for drawing tools
         canvas.selection = true
         if (activeToolRef.current !== 'select') (canvas as any).skipTargetFind = true
         canvas.renderAll()
@@ -1009,7 +1306,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         const isEditing = active && (active.type === 'i-text' || active.type === 'textbox') && (active as fabric.IText).isEditing
         if (e.metaKey || e.ctrlKey) {
           if (e.key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return }
-          if (e.key === 'a' && !isEditing) { e.preventDefault(); const objs = canvas.getObjects().filter((o: any) => !o.isLegend); if (objs.length) { canvas.setActiveObject(new fabric.ActiveSelection(objs, { canvas })); canvas.renderAll() } return }
+          if (e.key === 'a' && !isEditing) { e.preventDefault(); const objs = canvas.getObjects().filter((o: any) => !o.isLegend && !o._isCalloutLine); if (objs.length) { canvas.setActiveObject(new fabric.ActiveSelection(objs, { canvas })); canvas.renderAll() } return }
           if (e.key === 'c' && !isEditing) { e.preventDefault(); copySelected(); return }
           if (e.key === 'v' && !isEditing) { e.preventDefault(); pasteSelected(); return }
           if (e.key === 'd' && !isEditing) { e.preventDefault(); duplicateSelected(); return }
