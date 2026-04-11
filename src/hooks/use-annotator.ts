@@ -204,15 +204,24 @@ function applyLineControlsToAll(canvas: fabric.Canvas) {
 }
 
 // Re-measures actual Textbox heights and repositions all legend rows + resizes bg.
-// Called after text changes so the bg always fits its content.
-function relayoutLegend(canvas: fabric.Canvas) {
+// Pass newWidth to also resize label wrap width (on horizontal drag resize).
+function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
   const bg = canvas.getObjects().find((o: any) => o.isLegendBg) as any
   if (!bg) return
   const s = (bg._legendScale ?? 1) as number
   const pad = Math.round(14 * s), titleH = Math.round(28 * s)
   const swatchSz = Math.round(18 * s), xBtnSize = Math.round(16 * s)
-  const rowPad = Math.round(8 * s)
+  const rowPad = Math.round(8 * s), labelGap = Math.round(10 * s)
   const y = bg.top as number
+  const bgW = newBgWidth ?? (bg.width as number)
+
+  // If new width supplied, bake it into the bg rect (reset scale)
+  if (newBgWidth !== undefined) {
+    bg.set({ width: newBgWidth, scaleX: 1 }); bg.setCoords()
+  }
+
+  // Recompute label wrap width from current bg width
+  const labelW = bgW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
 
   // Labels in canvas insertion order (which matches colors order)
   const labels = canvas.getObjects().filter((o: any) =>
@@ -224,17 +233,27 @@ function relayoutLegend(canvas: fabric.Canvas) {
     const color = label.legendColor
     const swatch = canvas.getObjects().find((o: any) => o.isLegendSwatch && o.legendColor === color) as any
     const xBtn = canvas.getObjects().find((o: any) => o.isLegendX && o.legendColor === color) as any
-    const labelH = Math.max(swatchSz, label.height ?? swatchSz)
-    const rowH = labelH + rowPad
-    const rowMid = curY + rowH / 2
-    if (swatch) { swatch.set({ top: rowMid - swatchSz / 2 }); swatch.setCoords() }
-    label.set({ top: curY }); label.setCoords()
-    if (xBtn) { xBtn.set({ top: rowMid - xBtnSize / 2 }); xBtn.setCoords() }
+    // Update label width if horizontal resize changed it
+    if (newBgWidth !== undefined && Math.abs(label.width - labelW) > 1) {
+      label.set({ width: labelW }); label.initDimensions()
+    }
+    const labelH = label.height ?? swatchSz
+    const rowH = Math.max(swatchSz, labelH) + rowPad
+    // Swatch top-aligns with first line of text
+    if (swatch) { swatch.set({ top: curY, left: bg.left + pad }); swatch.setCoords() }
+    label.set({ top: curY, left: bg.left + pad + swatchSz + labelGap }); label.setCoords()
+    if (xBtn) { xBtn.set({ top: curY, left: bg.left + bgW - pad - xBtnSize }); xBtn.setCoords() }
     curY += rowH
   })
 
+  // Resize bg height to fit content; also update LEGEND title position
   const newH = (curY - y) + Math.round(pad / 2)
-  bg.set({ height: newH }); bg.setCoords()
+  bg.set({ height: newH, scaleY: 1 }); bg.setCoords()
+
+  // Update LEGEND title left in case width changed
+  const title = canvas.getObjects().find((o: any) => o.isLegend && !o.legendColor && !o.isLegendBg && !o.isLegendX) as any
+  if (title) { title.set({ left: bg.left + pad, top: y + pad - 2 }); title.setCoords() }
+
   canvas.renderAll()
 }
 
@@ -304,6 +323,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const onKeyRef = useRef<((e: KeyboardEvent) => void) | null>(null)
   const legendLabelsRef = useRef<Record<string, string>>({})
   const legendExcludedColorsRef = useRef<Set<string>>(new Set())
+  const legendResizingRef = useRef(false)  // guard against double-fire during resize
   const copiedRef = useRef<fabric.FabricObject | null>(null)
 
   // Stable refs so canvas event handlers (defined once) can call latest versions
@@ -645,12 +665,12 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const title = new fabric.FabricText('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: Math.round(13 * s), fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
     ;(title as any).isLegend = true; c.add(title)
 
-    // Pass 2: place rows using measured heights
+    // Pass 2: place rows using measured heights — swatch top-aligns with first text line
     let curY = y + pad + titleH
     colors.forEach((color, i) => {
       const rowH = rowHeights[i]
-      const rowMid = curY + rowH / 2
-      const sw = new fabric.Rect({ left: x + pad, top: rowMid - swatchSz / 2, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
+      // Swatch top = curY (same as label top) so first text line aligns with swatch
+      const sw = new fabric.Rect({ left: x + pad, top: curY, width: swatchSz, height: swatchSz, fill: color, rx: Math.round(3 * s), ry: Math.round(3 * s), selectable: true, evented: true, hasControls: false, hasBorders: false, hoverCursor: 'pointer', lockMovementX: true, lockMovementY: true })
       ;(sw as any).isLegend = true; (sw as any).isLegendSwatch = true; (sw as any).legendColor = color; c.add(sw)
       const label = new fabric.Textbox(labelTexts[i], {
         left: x + pad + swatchSz + labelGap, top: curY,
@@ -660,7 +680,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       })
       ;(label as any).isLegend = true; (label as any).legendColor = color; c.add(label)
       const xBtn = new fabric.FabricText('✕', {
-        left: x + totalW - pad - xBtnSize, top: rowMid - xBtnSize / 2,
+        left: x + totalW - pad - xBtnSize, top: curY,
         fontFamily: 'Arial, sans-serif', fontSize: Math.round(12 * s), fill: 'rgba(255,255,255,0.55)',
         selectable: false, evented: false, hasControls: false, hasBorders: false, hoverCursor: 'pointer',
         lockMovementX: true, lockMovementY: true, visible: false,
@@ -910,27 +930,27 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         }
       })
 
-      // While scaling the legend bg, hide child items so only the box is visible
+      // While scaling the legend bg, show a live preview by relaying out children
       canvas.on('object:scaling', (opt: any) => {
         const obj = opt.target as any
-        if (obj?.isLegendBg) {
-          canvas.getObjects().forEach((o: any) => { if (o.isLegend && !o.isLegendBg) o.opacity = 0 })
-        }
+        if (!obj?.isLegendBg || legendResizingRef.current) return
+        const newW = Math.round((obj.width as number) * (obj.scaleX as number))
+        legendResizingRef.current = true
+        relayoutLegend(canvas, newW)
+        legendResizingRef.current = false
       })
 
       canvas.on('object:modified', (opt: any) => {
+        if (legendResizingRef.current) return
         const obj = opt.target as any
         if (obj?.isLegendBg && (obj.scaleX !== 1 || obj.scaleY !== 1)) {
-          // Rebuild legend at new proportional scale
-          const baseScale = (obj._legendScale ?? 1) as number
-          const newScale = baseScale * ((obj.scaleX ?? 1) + (obj.scaleY ?? 1)) / 2
-          const pos = { x: obj.left!, y: obj.top! }
-          // Collect colors before rebuild removes them (exclude X buttons and swatches — only labels/bg carry canonical color list)
-          saveLegendLabels()
-          const existingColors = [...new Set(
-            canvas.getObjects().filter((o: any) => o.isLegend && o.legendColor && !o.isLegendX && !o.isLegendSwatch && !o.isLegendBg).map((o: any) => o.legendColor as string)
-          )]
-          buildLegend(existingColors, pos, newScale)
+          legendResizingRef.current = true
+          // Bake scale into actual pixel dimensions — keep font sizes unchanged
+          const newW = Math.round((obj.width as number) * (obj.scaleX as number))
+          // Height is managed by relayoutLegend from content — ignore scaleY
+          obj.set({ width: newW, scaleX: 1, scaleY: 1 }); obj.setCoords()
+          relayoutLegend(canvas, newW)
+          legendResizingRef.current = false
         }
         saveHistory()
       })
