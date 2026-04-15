@@ -4,6 +4,7 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import * as fabric from 'fabric'
 import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown, RotateCcw, Search, Crop } from 'lucide-react'
 import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@/hooks/use-annotator'
+import { CropOverlay } from '@/components/crop-overlay'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
 interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void }
@@ -19,10 +20,10 @@ const TOOL_GRID: { tool: Tool; Icon: typeof MousePointer2; label: string; key: s
   ],
   [
     { tool: 'text', Icon: Type, label: 'Text', key: 'T' },
-    { tool: 'callout', Icon: Search, label: 'Callout', key: '' },
+    { tool: 'callout', Icon: Search, label: 'Callout', key: 'O' },
   ],
   [
-    { tool: 'crop', Icon: Crop, label: 'Crop', key: '' },
+    { tool: 'crop', Icon: Crop, label: 'Crop', key: 'P' },
     { tool: 'select', Icon: MousePointer2, label: 'Select', key: 'V' },
   ],
 ]
@@ -102,12 +103,9 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
   }, [applyEnhancement])
 
   const handleResetConfirmed = useCallback(() => {
-    const canvas = a.fabricRef.current; if (!canvas) return
-    canvas.getObjects().forEach((o) => canvas.remove(o))
-    canvas.discardActiveObject(); canvas.renderAll()
-    canvas.fire('object:modified' as any)
+    a.resetPhoto()
     setShowResetConfirm(false)
-  }, [a.fabricRef])
+  }, [a.resetPhoto])
 
   const sectionLabel = (text: string) => (
     <div className="px-3 pt-5 pb-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">{text}</div>
@@ -124,12 +122,11 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
         <div className="px-3 flex flex-col gap-1">
           {TOOL_GRID.map((row, ri) => (
             <div key={ri} className="grid grid-cols-2 gap-1">
-              {row.map(({ tool, Icon, label, key }) => (
+              {row.map(({ tool, Icon, key }) => (
                 <button key={tool} onClick={() => a.changeTool(tool)}
-                  className={`flex items-center gap-2 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors ${a.activeTool === tool ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'}`}>
+                  className={`flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors ${a.activeTool === tool ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'}`}>
                   <Icon size={16} />
-                  <span className="text-xs">{label}</span>
-                  <span className={`ml-auto text-[10px] font-mono ${a.activeTool === tool ? 'text-blue-200' : 'text-zinc-600'}`}>{key}</span>
+                  {key && <span className={`text-[10px] font-mono ${a.activeTool === tool ? 'text-blue-200' : 'text-zinc-600'}`}>{key}</span>}
                 </button>
               ))}
             </div>
@@ -282,14 +279,24 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack }
         </div>
       </div>
 
-      <div ref={containerRef} className="flex-1 overflow-hidden"><canvas ref={canvasElRef} /></div>
+      <div ref={containerRef} className="flex-1 overflow-hidden relative">
+        <canvas ref={canvasElRef} />
+        {a.cropMode && (
+          <CropOverlay
+            bounds={a.cropBounds}
+            onBoundsChange={a.updateCropBounds}
+            onConfirm={a.confirmCrop}
+            onCancel={a.cancelCrop}
+          />
+        )}
+      </div>
 
       {showResetConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-80 shadow-2xl">
             <h2 className="text-white font-semibold text-base mb-2">Delete all markings?</h2>
             <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
-              Are you sure you want to delete all markings? You can undo this with the undo button.
+              This will remove all markings and reset the photo to its original (uncropped) state.
             </p>
             <div className="flex gap-3">
               <button onClick={() => setShowResetConfirm(false)} className="flex-1 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-white text-sm font-medium">Cancel</button>

@@ -4,6 +4,7 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import * as fabric from 'fabric'
 import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, ArrowLeft, AArrowUp, AArrowDown, Pen, PaintBucket, Eye, List, RotateCcw, MoreHorizontal, Search, Crop } from 'lucide-react'
 import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@/hooks/use-annotator'
+import { CropOverlay } from '@/components/crop-overlay'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
 interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void }
@@ -189,12 +190,9 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
   }, [applyEnhancement])
 
   const handleResetConfirmed = useCallback(() => {
-    const canvas = a.fabricRef.current; if (!canvas) return
-    canvas.getObjects().forEach((o) => canvas.remove(o))
-    canvas.discardActiveObject(); canvas.renderAll()
-    canvas.fire('object:modified' as any)
+    a.resetPhoto()
     setShowResetConfirm(false); setShowMore(false)
-  }, [a.fabricRef])
+  }, [a.resetPhoto])
 
   const toggleColorMode = useCallback(() => {
     if (a.selectedType === 'text') {
@@ -217,8 +215,16 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
       </button>
 
       {/* Canvas */}
-      <div ref={containerRef} className="flex-1 overflow-hidden min-h-0">
+      <div ref={containerRef} className="flex-1 overflow-hidden min-h-0 relative">
         <canvas ref={canvasElRef} />
+        {a.cropMode && (
+          <CropOverlay
+            bounds={a.cropBounds}
+            onBoundsChange={a.updateCropBounds}
+            onConfirm={a.confirmCrop}
+            onCancel={a.cancelCrop}
+          />
+        )}
       </div>
 
       {/* Bottom toolbar */}
@@ -353,7 +359,7 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-6">
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <h2 className="text-white font-semibold text-base mb-2">Delete all markings?</h2>
-            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">This will remove all annotations. You can undo with the undo button.</p>
+            <p className="text-zinc-400 text-sm mb-6 leading-relaxed">This will remove all markings and reset the photo to its original (uncropped) state.</p>
             <div className="flex gap-3">
               <button onClick={() => setShowResetConfirm(false)} className="flex-1 py-3 rounded-xl bg-zinc-700 active:bg-zinc-600 text-white text-sm font-medium">Cancel</button>
               <button onClick={handleResetConfirmed} className="flex-1 py-3 rounded-xl bg-red-600 active:bg-red-500 text-white text-sm font-medium">Delete All</button>

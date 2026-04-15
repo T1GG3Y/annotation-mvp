@@ -62,7 +62,7 @@ function getUsedColors(canvas: fabric.Canvas): string[] {
   const used: string[] = []
   const found = new Set<string>()
   canvas.getObjects().forEach((obj: any) => {
-    if (obj.isLegend || obj._isCalloutAnchor || obj._isCalloutBubble || obj._isCalloutLine) return
+    if (obj.isLegend || obj._isCalloutAnchor || obj._isCalloutLine) return
     const sources: (string | undefined)[] = [obj.stroke, obj._boxStroke]
     sources.forEach((src) => {
       const hex = extractHex(src)
@@ -260,7 +260,7 @@ function applyCalloutBubbleRenderer(bubble: any, canvas: fabric.Canvas) {
       const r = (obj as any).radius ?? 60
       const zoom: number = (obj as any)._calloutZoom ?? 2
       // angle 0 = 12 o'clock (zoom=1), π/2 = 3 o'clock (zoom=3)
-      const angle = ((zoom - 1) / 2) * (Math.PI / 2)
+      const angle = ((zoom - 1) / 4) * (Math.PI / 2)
       const hx = Math.sin(angle) * (r + HANDLE_OFFSET)
       const hy = -Math.cos(angle) * (r + HANDLE_OFFSET)
       return new fabric.Point(hx, hy).transform(finalMatrix)
@@ -272,7 +272,7 @@ function applyCalloutBubbleRenderer(bubble: any, canvas: fabric.Canvas) {
       // atan2(x, -y) gives angle from top going clockwise
       let angle = Math.atan2(localX, -localY)
       angle = Math.max(0, Math.min(Math.PI / 2, angle))
-      b._calloutZoom = 1 + (angle / (Math.PI / 2)) * 2
+      b._calloutZoom = 1 + (angle / (Math.PI / 2)) * 4
       b.dirty = true; b._fabricCanvas?.renderAll()
       return true
     },
@@ -573,6 +573,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const legendResizingRef = useRef(false)
   const copiedRef = useRef<fabric.FabricObject | null>(null)
 
+  const [cropMode, setCropMode] = useState(false)
+  const cropModeRef = useRef(false)
+  const [cropBounds, setCropBounds] = useState({ left: 0, top: 0, width: 100, height: 100 })
+  const cropBoundsRef = useRef({ left: 0, top: 0, width: 100, height: 100 })
+  const justCreatedRef = useRef<fabric.FabricObject | null>(null)
+  const imageUrlRef = useRef(imageUrl)
+  imageUrlRef.current = imageUrl
+
   const maybeUpdateLegendRef = useRef<() => void>(() => {})
   const removeLegendColorRef = useRef<(color: string) => void>(() => {})
 
@@ -609,14 +617,76 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   // -- Tool --
 
   const changeTool = useCallback((tool: Tool) => {
+    // Cancel crop mode when switching away
+    if (cropModeRef.current && tool !== 'crop') {
+      cropModeRef.current = false; setCropMode(false)
+    }
     setActiveTool(tool); activeToolRef.current = tool
+    justCreatedRef.current = null
     const c = fabricRef.current; if (!c) return
     c.isDrawingMode = false
     if (tool === 'select') {
       c.selection = true; (c as any).skipTargetFind = false; c.defaultCursor = 'default'; c.hoverCursor = 'move'
+    } else if (tool === 'crop') {
+      c.selection = false; (c as any).skipTargetFind = true
+      c.discardActiveObject(); c.defaultCursor = 'default'; c.hoverCursor = 'default'
+      // Initialise crop bounds to displayed background image bounds (or 80% of canvas)
+      const bg = c.backgroundImage as any
+      let bounds: { left: number; top: number; width: number; height: number }
+      if (bg) {
+        const bw = Math.round((bg.width  ?? 0) * (bg.scaleX ?? 1))
+        const bh = Math.round((bg.height ?? 0) * (bg.scaleY ?? 1))
+        const bl = Math.round((bg.left   ?? c.width!  / 2) - bw / 2)
+        const bt = Math.round((bg.top    ?? c.height! / 2) - bh / 2)
+        bounds = { left: Math.max(0, bl), top: Math.max(0, bt), width: Math.min(bw, c.width!), height: Math.min(bh, c.height!) }
+      } else {
+        bounds = { left: Math.round(c.width! * 0.1), top: Math.round(c.height! * 0.1), width: Math.round(c.width! * 0.8), height: Math.round(c.height! * 0.8) }
+      }
+      cropBoundsRef.current = bounds; setCropBounds(bounds)
+      cropModeRef.current = true; setCropMode(true); c.renderAll()
     } else {
       c.selection = false; (c as any).skipTargetFind = true
       c.discardActiveObject(); c.defaultCursor = 'crosshair'; c.hoverCursor = 'crosshair'; c.renderAll()
+    }
+  }, [])
+
+  const confirmCrop = useCallback(() => {
+    const c = fabricRef.current; if (!c || !cropModeRef.current) return
+    const b = cropBoundsRef.current
+    cropModeRef.current = false; setCropMode(false)
+    if (b.width > 20 && b.height > 20) applyCrop(c, b.left, b.top, b.width, b.height, saveHistory)
+    applySelectMode(c, setActiveTool, activeToolRef)
+  }, [saveHistory])
+
+  const cancelCrop = useCallback(() => {
+    const c = fabricRef.current; if (!c) return
+    cropModeRef.current = false; setCropMode(false)
+    applySelectMode(c, setActiveTool, activeToolRef)
+  }, [])
+
+  const updateCropBounds = useCallback((bounds: { left: number; top: number; width: number; height: number }) => {
+    cropBoundsRef.current = bounds; setCropBounds(bounds)
+  }, [])
+
+  const resetPhoto = useCallback(() => {
+    const c = fabricRef.current; if (!c) return
+    if (cropModeRef.current) { cropModeRef.current = false; setCropMode(false) }
+    c.getObjects().forEach((o) => c.remove(o))
+    c.discardActiveObject()
+    const loader = (fabric as any).FabricImage?.fromURL ?? (fabric as any).Image?.fromURL
+    const url = imageUrlRef.current
+    if (loader && url && url !== '__saved__') {
+      loader.call((fabric as any).FabricImage ?? (fabric as any).Image, url, { crossOrigin: 'anonymous' })
+        .then((img: any) => {
+          const w = c.width!, h = c.height!
+          const scale = Math.min(w / img.width!, h / img.height!) * 0.95
+          img.set({ scaleX: scale, scaleY: scale, originX: 'center', originY: 'center', left: w / 2, top: h / 2 })
+          c.backgroundImage = img; c.renderAll()
+          c.fire('object:modified' as any)
+        })
+    } else {
+      c.backgroundImage = undefined as any; c.renderAll()
+      c.fire('object:modified' as any)
     }
   }, [])
 
@@ -650,11 +720,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       if (obj && obj.type !== 'i-text' && obj.type !== 'textbox') {
         const strokeVal = hexToRgba(color, strokeOpacityRef.current)
         obj.set({ stroke: strokeVal, strokeWidth: strokeWidthRef.current })
-        // Sync callout group: anchor + connector follow the selected object's stroke
+        // Sync callout group: anchor ↔ bubble always share stroke color
         const calloutId = (obj as any)._calloutId
         if (calloutId && c) {
           c.getObjects().filter((o: any) => o._calloutId === calloutId && o !== obj).forEach((o: any) => {
-            if ((o as any)._isCalloutAnchor) o.set({ stroke: strokeVal })
+            if ((o as any)._isCalloutAnchor || (o as any)._isCalloutBubble) {
+              o.set({ stroke: strokeVal })
+              if ((o as any)._isCalloutBubble) o.dirty = true
+            }
           })
           updateCalloutConnector(c, calloutId)
         }
@@ -763,7 +836,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         const calloutId = (obj as any)._calloutId
         if (calloutId && c) {
           c.getObjects().filter((o: any) => o._calloutId === calloutId && o !== obj).forEach((o: any) => {
-            if ((o as any)._isCalloutAnchor) o.set({ stroke: strokeVal })
+            if ((o as any)._isCalloutAnchor || (o as any)._isCalloutBubble) {
+              o.set({ stroke: strokeVal })
+              if ((o as any)._isCalloutBubble) o.dirty = true
+            }
           })
           updateCalloutConnector(c, calloutId)
         }
@@ -793,12 +869,19 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const c = fabricRef.current; if (!c) return
     const obj = c.getActiveObject(); if (!obj) return
     if (obj.type !== 'i-text' && obj.type !== 'textbox') {
-      obj.set({ strokeWidth: w })
-      // Sync callout group stroke width
       const calloutId = (obj as any)._calloutId
+      if ((obj as any)._isCalloutAnchor && calloutId) {
+        // Anchor selected: update bubble + connector width, never anchor itself
+        const bubble = c.getObjects().find((o: any) => o._calloutId === calloutId && (o as any)._isCalloutBubble) as any
+        const line   = c.getObjects().find((o: any) => o._calloutId === calloutId && (o as any)._isCalloutLine)   as any
+        if (bubble) { bubble.set({ strokeWidth: w }); bubble.dirty = true }
+        if (line)   line.set({ strokeWidth: Math.max(0.5, w * 0.4) })
+        c.renderAll(); saveHistory(); return
+      }
+      obj.set({ strokeWidth: w })
       if (calloutId) {
+        // Bubble selected: update connector only — anchor width never changes
         c.getObjects().filter((o: any) => o._calloutId === calloutId && o !== obj).forEach((o: any) => {
-          if ((o as any)._isCalloutAnchor) o.set({ strokeWidth: w })
           if ((o as any)._isCalloutLine) o.set({ strokeWidth: Math.max(0.5, w * 0.4) })
         })
       }
@@ -1043,7 +1126,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         const isLine = obj.type === 'line' || isCalloutObj
         setSelectedType('shape')
         setSelectedSubType(isLine ? 'line' : 'fillable')
-        if (isLine || colorModeRef.current === 'text') { setColorMode('stroke'); colorModeRef.current = 'stroke' }
+        // Always switch to Stroke when any shape is selected (Fill is rarely used)
+        setColorMode('stroke'); colorModeRef.current = 'stroke'
         if (isCalloutObj) {
           // Sync active color from callout stroke
           const hex = extractHex(typeof obj.stroke === 'string' ? obj.stroke : '') as AnnotationColor
@@ -1065,7 +1149,17 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       // --- Drawing mouse:down ---
       canvas.on('mouse:down', (opt) => {
         const tool = activeToolRef.current, color = activeColorRef.current
-        if (tool === 'select') return
+        if (tool === 'select' || tool === 'crop') return
+
+        // If the user clicks the just-drawn shape, let Fabric handle move/resize
+        if (justCreatedRef.current && opt.target === justCreatedRef.current) return
+
+        // Any other click: clear just-created and begin drawing
+        justCreatedRef.current = null
+        canvas.discardActiveObject()
+        ;(canvas as any).skipTargetFind = true
+        canvas.selection = false
+
         const pointer = getPointer(canvas, opt)
 
         if (tool === 'text') {
@@ -1117,18 +1211,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           canvas.renderAll(); saveHistory(); return
         }
 
-        if (tool === 'crop') {
-          isDrawingRef.current = true; startRef.current = { x: pointer.x, y: pointer.y }
-          const cropOverlay = new fabric.Rect({
-            left: pointer.x, top: pointer.y, width: 0, height: 0,
-            fill: 'rgba(0,0,0,0)',
-            stroke: '#FFFFFF', strokeWidth: 2,
-            strokeDashArray: [8, 4],
-            selectable: false, evented: false,
-          })
-          canvas.add(cropOverlay); shapeRef.current = cropOverlay; canvas.selection = false; return
-        }
-
         isDrawingRef.current = true; startRef.current = { x: pointer.x, y: pointer.y }
         const sw = strokeWidthRef.current
         const strokeColor = hexToRgba(color, strokeOpacityRef.current)
@@ -1143,12 +1225,6 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         if (!isDrawingRef.current || !shapeRef.current) return
         const pointer = getPointer(canvas, opt)
         const s = startRef.current, shape = shapeRef.current, tool = activeToolRef.current
-
-        if (tool === 'crop') {
-          const w = pointer.x - s.x, h = pointer.y - s.y
-          shape.set({ left: w >= 0 ? s.x : pointer.x, top: h >= 0 ? s.y : pointer.y, width: Math.abs(w), height: Math.abs(h) })
-          canvas.renderAll(); return
-        }
 
         const shift = (opt.e as MouseEvent).shiftKey
         if (tool === 'circle') {
@@ -1180,31 +1256,26 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         if (!isDrawingRef.current) return; isDrawingRef.current = false
         const shape = shapeRef.current, tool = activeToolRef.current
 
-        if (tool === 'crop' && shape) {
-          const w = (shape as fabric.Rect).width ?? 0, h = (shape as fabric.Rect).height ?? 0
-          const left = shape.left ?? 0, top = shape.top ?? 0
-          canvas.remove(shape); shapeRef.current = null
-          if (w > 20 && h > 20) applyCrop(canvas, left, top, w, h, saveHistory)
-          applySelectMode(canvas, setActiveTool, activeToolRef)
-          canvas.renderAll(); return
-        }
-
         if (shape) {
           let len = 0
           if (shape.type === 'ellipse') { const e = shape as fabric.Ellipse; len = Math.max(e.rx ?? 0, e.ry ?? 0) }
           else if (shape.type === 'rect') len = Math.max(shape.width ?? 0, shape.height ?? 0)
           else if (shape.type === 'line') { const l = shape as fabric.Line; len = Math.sqrt(((l.x2 ?? 0) - (l.x1 ?? 0)) ** 2 + ((l.y2 ?? 0) - (l.y1 ?? 0)) ** 2) }
-          if (len < 4) { canvas.remove(shape) }
-          else if (tool === 'arrow') {
+          if (len < 4) {
+            canvas.remove(shape); justCreatedRef.current = null
+          } else if (tool === 'arrow') {
             ;(shape as any)._isArrow = true
             applyArrowRenderer(shape as fabric.Line); applyLineEndpointControls(shape as fabric.Line)
             shape.dirty = true; shape.setCoords(); canvas.setActiveObject(shape); saveHistory()
+            justCreatedRef.current = shape
           } else {
             if (shape.type === 'line') applyLineEndpointControls(shape as fabric.Line)
             shape.setCoords(); canvas.setActiveObject(shape); saveHistory()
+            justCreatedRef.current = shape
           }
         }
-        canvas.selection = true; (canvas as any).skipTargetFind = true
+        // skipTargetFind=false so the just-drawn shape can be grabbed without switching to select
+        canvas.selection = true; (canvas as any).skipTargetFind = false
         canvas.defaultCursor = 'crosshair'
         maybeUpdateLegendRef.current()
         shapeRef.current = null; canvas.renderAll()
@@ -1384,6 +1455,8 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           case 'c': case 'C': if (!isEditing) changeTool('circle'); break
           case 'r': case 'R': if (!isEditing) changeTool('rectangle'); break
           case 't': case 'T': if (!isEditing) changeTool('text'); break
+          case 'o': case 'O': if (!isEditing) changeTool('callout'); break
+          case 'p': case 'P': if (!isEditing) changeTool('crop'); break
         }
       }
       onKeyRef.current = onKey; document.addEventListener('keydown', onKey)
@@ -1399,11 +1472,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   return {
     activeTool, colorMode, activeColor, fillColor, activeTextColor, strokeOpacity, fillOpacity, strokeWidth,
     isFilled, isStroked, fontSize, selectedType, selectedSubType, canUndo, canRedo, hasSelection, legendPickerColor,
+    cropMode, cropBounds,
     changeTool, setColorModeAction, toggleColorMode, changeColor, clearFill, clearStroke,
     changeOpacity, changeStrokeWidth, changeFontSize,
     copySelected, pasteSelected, duplicateSelected,
     placeLegendShape,
     undo, redo, deleteSelected, downloadImage, saveEditable, createLegend, removeLegendColor,
+    confirmCrop, cancelCrop, updateCropBounds, resetPhoto,
     fabricRef,
   }
 }
