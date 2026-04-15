@@ -2,7 +2,7 @@
 
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as fabric from 'fabric'
-import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown, RotateCcw, Search } from 'lucide-react'
+import { MousePointer2, ArrowUpRight, Minus, Circle, Square, Type, Undo2, Redo2, Trash2, Download, Save, ArrowLeft, List, AArrowUp, AArrowDown, RotateCcw, Search, Crop } from 'lucide-react'
 import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@/hooks/use-annotator'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
@@ -22,6 +22,7 @@ const TOOL_GRID: { tool: Tool; Icon: typeof MousePointer2; label: string; key: s
     { tool: 'callout', Icon: Search, label: 'Callout', key: '' },
   ],
   [
+    { tool: 'crop', Icon: Crop, label: 'Crop', key: '' },
     { tool: 'select', Icon: MousePointer2, label: 'Select', key: 'V' },
   ],
 ]
