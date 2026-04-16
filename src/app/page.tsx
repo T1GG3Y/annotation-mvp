@@ -1,8 +1,10 @@
 import Link from 'next/link'
 
 const versions = [
-  { href: '/f', title: 'Mobile Prototype A', subtitle: 'Bottom Toolbar', desc: 'Portrait-optimized for phones and tablets. Touch-sized controls, pinch-to-zoom, and Damage Visibility.' },
-  { href: '/e', title: 'Desktop Prototype', subtitle: 'Left Sidebar', desc: 'Full-featured desktop annotation tool with Damage Visibility, legend, copy/paste, and keyboard shortcuts.' },
+  { href: '/a', title: 'Prototype A', subtitle: 'Mobile — Core Tools', desc: 'Portrait-optimized for phones and tablets. Touch-sized controls, pinch-to-zoom, and Damage Visibility. No crop or callout.' },
+  { href: '/b', title: 'Prototype B', subtitle: 'Desktop — Core Tools', desc: 'Left-sidebar desktop tool with legend, copy/paste, and keyboard shortcuts. No crop or callout.' },
+  { href: '/c', title: 'Prototype C', subtitle: 'Mobile — All Features', desc: 'Full mobile experience with crop mode, callout loupe, legend, pinch-to-zoom, and Damage Visibility.' },
+  { href: '/d', title: 'Prototype D', subtitle: 'Desktop — All Features', desc: 'Full desktop experience with crop mode, callout loupe, legend, copy/paste, and keyboard shortcuts.' },
 ]
 
 export default function Home() {

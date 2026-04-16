@@ -28,7 +28,7 @@ export const STROKE_LABELS = ['Thin', 'Medium', 'Thick'] as const
 
 const DEFAULT_STROKE = 6
 const MAX_HISTORY = 40
-const DEFAULT_LEGEND_WIDTH = 220 // reference width used for font-size scaling
+const DEFAULT_LEGEND_WIDTH = 220 // reference width for legend layout
 
 const CUSTOM_PROPS = [
   '_boxStroke', '_boxStrokeWidth', 'isLegend', 'isLegendBg', 'isLegendSwatch', 'isLegendX',
@@ -438,16 +438,7 @@ function applyCrop(
 // Legend layout helpers
 // ---------------------------------------------------------------------------
 
-// Font size derived from legend width: proportional, capped at 15px (default at 220px)
-function legendFontSize(bgW: number): number {
-  return Math.max(8, Math.min(15, Math.round(15 * bgW / DEFAULT_LEGEND_WIDTH)))
-}
-function legendTitleFontSize(bgW: number): number {
-  return Math.max(7, Math.min(13, Math.round(13 * bgW / DEFAULT_LEGEND_WIDTH)))
-}
-function legendXFontSize(bgW: number): number {
-  return Math.max(7, Math.min(12, Math.round(12 * bgW / DEFAULT_LEGEND_WIDTH)))
-}
+// Legend font size is fixed (user-controllable via +/- buttons), not derived from width
 
 function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
   const bg = canvas.getObjects().find((o: any) => o.isLegendBg) as any
@@ -465,11 +456,7 @@ function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
     ;(bg as any)._legendWidth = clampedW
   }
 
-  // Recompute font sizes from new width
-  const fs = legendFontSize(bgW)
-  const titleFS = legendTitleFontSize(bgW)
-  const xFS = legendXFontSize(bgW)
-
+  // Font size is NOT recomputed from width — it is user-controlled (legendFontSzRef)
   const labelW = bgW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
   const labels = canvas.getObjects().filter((o: any) =>
     o.isLegend && (o.type === 'textbox' || o.type === 'i-text') && o.legendColor && !o.isLegendX
@@ -480,12 +467,10 @@ function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
     const color = label.legendColor
     const swatch = canvas.getObjects().find((o: any) => o.isLegendSwatch && o.legendColor === color) as any
     const xBtn = canvas.getObjects().find((o: any) => o.isLegendX && o.legendColor === color) as any
-    if (label.fontSize !== fs) { label.set({ fontSize: fs }) }
     if (clampedW !== undefined && Math.abs(label.width - labelW) > 1) {
       label.set({ width: labelW })
     }
     label.initDimensions()
-    if (xBtn && xBtn.fontSize !== xFS) xBtn.set({ fontSize: xFS })
     const labelH = label.height ?? swatchSz
     const rowH = Math.max(swatchSz, labelH) + rowPad
     if (swatch) { swatch.set({ top: curY, left: bg.left + pad }); swatch.setCoords() }
@@ -499,7 +484,6 @@ function relayoutLegend(canvas: fabric.Canvas, newBgWidth?: number) {
 
   const title = canvas.getObjects().find((o: any) => o.isLegend && !o.legendColor && !o.isLegendBg && !o.isLegendX) as any
   if (title) {
-    if (title.fontSize !== titleFS) title.set({ fontSize: titleFS })
     title.set({ left: bg.left + pad, top: y + pad - 2 }); title.setCoords()
   }
   canvas.renderAll()
@@ -577,9 +561,16 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const cropModeRef = useRef(false)
   const [cropBounds, setCropBounds] = useState({ left: 0, top: 0, width: 100, height: 100 })
   const cropBoundsRef = useRef({ left: 0, top: 0, width: 100, height: 100 })
+  const [hasCrop, setHasCrop] = useState(false)
+  const preCropSnapshotRef = useRef<string | null>(null)
   const justCreatedRef = useRef<fabric.FabricObject | null>(null)
   const imageUrlRef = useRef(imageUrl)
   imageUrlRef.current = imageUrl
+
+  const [isLegendSelected, setIsLegendSelected] = useState(false)
+  const isLegendSelectedRef = useRef(false)
+  const legendFontSzRef = useRef(15)
+  const textJustDoneRef = useRef<fabric.IText | null>(null)
 
   const maybeUpdateLegendRef = useRef<() => void>(() => {})
   const removeLegendColorRef = useRef<(color: string) => void>(() => {})
@@ -653,8 +644,14 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const confirmCrop = useCallback(() => {
     const c = fabricRef.current; if (!c || !cropModeRef.current) return
     const b = cropBoundsRef.current
+    // Save snapshot BEFORE crop so revert can restore it
+    preCropSnapshotRef.current = JSON.stringify((c as any).toJSON(CUSTOM_PROPS))
     cropModeRef.current = false; setCropMode(false)
-    if (b.width > 20 && b.height > 20) applyCrop(c, b.left, b.top, b.width, b.height, saveHistory)
+    if (b.width > 20 && b.height > 20) {
+      applyCrop(c, b.left, b.top, b.width, b.height, () => { setHasCrop(true); saveHistory() })
+    } else {
+      saveHistory()
+    }
     applySelectMode(c, setActiveTool, activeToolRef)
   }, [saveHistory])
 
@@ -663,6 +660,19 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     cropModeRef.current = false; setCropMode(false)
     applySelectMode(c, setActiveTool, activeToolRef)
   }, [])
+
+  const revertCrop = useCallback(() => {
+    const c = fabricRef.current; if (!c || !preCropSnapshotRef.current) return
+    cropModeRef.current = false; setCropMode(false)
+    loadingHistoryRef.current = true
+    c.loadFromJSON(JSON.parse(preCropSnapshotRef.current)).then(() => {
+      applyBoxStrokeToAll(c); applyLineControlsToAll(c); applyCalloutControlsToAll(c)
+      c.renderAll(); loadingHistoryRef.current = false
+      preCropSnapshotRef.current = null; setHasCrop(false)
+      saveHistory()
+      applySelectMode(c, setActiveTool, activeToolRef)
+    })
+  }, [saveHistory])
 
   const updateCropBounds = useCallback((bounds: { left: number; top: number; width: number; height: number }) => {
     cropBoundsRef.current = bounds; setCropBounds(bounds)
@@ -892,9 +902,20 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   // -- Font size --
 
   const changeFontSize = useCallback((delta: number) => {
+    const c = fabricRef.current; if (!c) return
+    // Legend selected: change all legend text uniformly
+    if (isLegendSelectedRef.current) {
+      const next = Math.max(8, Math.min(40, legendFontSzRef.current + delta))
+      legendFontSzRef.current = next
+      c.getObjects().forEach((o: any) => {
+        if (o.isLegend && (o.type === 'textbox' || o.type === 'i-text' || o.type === 'text')) {
+          o.set({ fontSize: next }); o.initDimensions?.()
+        }
+      })
+      relayoutLegend(c); saveHistory(); return
+    }
     const next = Math.max(8, Math.min(120, fontSizeRef.current + delta))
     setFontSize(next); fontSizeRef.current = next
-    const c = fabricRef.current; if (!c) return
     const obj = c.getActiveObject()
     if (obj && (obj.type === 'i-text' || obj.type === 'textbox')) {
       obj.set({ fontSize: next }); c.renderAll(); saveHistory()
@@ -976,7 +997,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     const defaultW = Math.round(DEFAULT_LEGEND_WIDTH * s)
     const totalW = fixedWidth !== undefined ? Math.max(120, fixedWidth) : defaultW
     const maxLabelW = totalW - pad * 2 - swatchSz - labelGap - xBtnSize - Math.round(8 * s)
-    const fontSize = legendFontSize(totalW)
+    const fontSize = legendFontSzRef.current
 
     if (colors.length === 0) {
       const emptyH = pad * 2 + Math.round(60 * s)
@@ -1007,11 +1028,11 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
     // Horizontal-only resize
     bg.setControlsVisibility({ tl: false, tr: false, bl: false, br: false, mt: false, mb: false, mtr: false, ml: true, mr: true })
 
-    const titleFS = legendTitleFontSize(totalW)
+    const titleFS = legendFontSzRef.current
     const title = new fabric.FabricText('LEGEND', { left: x + pad, top: y + pad - 2, fontFamily: 'Arial, sans-serif', fontSize: titleFS, fontWeight: 'bold', fill: 'rgba(255,255,255,0.6)', selectable: false, evented: false })
     ;(title as any).isLegend = true; c.add(title)
 
-    const xFS = legendXFontSize(totalW)
+    const xFS = legendFontSzRef.current
     let curY = y + pad + titleH
     colors.forEach((color, i) => {
       const rowH = rowHeights[i]
@@ -1109,7 +1130,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
       const syncSelectedType = () => {
         const obj = canvas.getActiveObject()
-        if (!obj) { setSelectedType('none'); setSelectedSubType('none'); return }
+        if (!obj) { setSelectedType('none'); setSelectedSubType('none'); isLegendSelectedRef.current = false; setIsLegendSelected(false); return }
+        // Detect legend selection
+        const isLegendObj = !!(obj as any).isLegend
+        isLegendSelectedRef.current = isLegendObj; setIsLegendSelected(isLegendObj)
         if (obj.type === 'i-text' || obj.type === 'textbox') {
           setSelectedType('text'); setSelectedSubType('text')
           setColorMode('text'); colorModeRef.current = 'text'
@@ -1150,6 +1174,11 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       canvas.on('mouse:down', (opt) => {
         const tool = activeToolRef.current, color = activeColorRef.current
         if (tool === 'select' || tool === 'crop') return
+
+        // First click after text editing exits: keep textbox selected, don't create a new one
+        if (tool === 'text' && textJustDoneRef.current) {
+          textJustDoneRef.current = null; return
+        }
 
         // If the user clicks the just-drawn shape, let Fabric handle move/resize
         if (justCreatedRef.current && opt.target === justCreatedRef.current) return
@@ -1314,6 +1343,7 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       })
       canvas.on('selection:cleared', () => {
         setHasSelection(false); setSelectedType('none'); setLegendPickerColor(null)
+        isLegendSelectedRef.current = false; setIsLegendSelected(false)
         canvas.uniformScaling = false; setXBtnsVisible(false)
         canvas.getObjects().forEach((o: any) => { if (o._isCalloutAnchor) o.visible = false })
         canvas.renderAll()
@@ -1398,7 +1428,11 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
         // Also record anchor start position for delta tracking
         if (t?._isCalloutAnchor) calloutAnchorPrevPos.set(t._calloutId, { x: t.left!, y: t.top! })
         if (t?.isLegendX && t?.legendColor) {
-          removeLegendColorRef.current(t.legendColor); canvas.discardActiveObject(); canvas.renderAll(); return
+          removeLegendColorRef.current(t.legendColor)
+          // Re-select the new legend bg so the legend stays selected after rebuild
+          const newBg = canvas.getObjects().find((o: any) => o.isLegendBg)
+          if (newBg) { canvas.setActiveObject(newBg) } else { canvas.discardActiveObject() }
+          canvas.renderAll(); return
         }
         if (t?.isLegend && (t.type === 'i-text' || t.type === 'textbox')) {
           canvas.setActiveObject(t); (t as fabric.IText).enterEditing(); canvas.renderAll()
@@ -1418,15 +1452,20 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
       canvas.on('text:editing:exited', (opt: any) => {
         const t = opt.target
         if (t && typeof t.text === 'string' && t.text.trim() === '' && !(t as any).isLegend) {
-          canvas.remove(t)
+          canvas.remove(t); textJustDoneRef.current = null
         } else if (t && (t as any).isLegend && (t as any).legendColor) {
           legendLabelsRef.current[(t as any).legendColor] = t.text || 'edit'
           relayoutLegend(canvas)
         }
         saveHistory()
-        if (t && t.text?.trim() !== '') canvas.setActiveObject(t)
+        if (t && t.text?.trim() !== '') {
+          canvas.setActiveObject(t)
+          // Mark so the immediate next mouse:down (same or next click) won't create a new textbox
+          textJustDoneRef.current = t
+          // Keep skipTargetFind=false so the next click can detect the textbox
+          ;(canvas as any).skipTargetFind = false
+        }
         canvas.selection = true
-        if (activeToolRef.current !== 'select') (canvas as any).skipTargetFind = true
         canvas.renderAll()
       })
 
@@ -1472,13 +1511,13 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   return {
     activeTool, colorMode, activeColor, fillColor, activeTextColor, strokeOpacity, fillOpacity, strokeWidth,
     isFilled, isStroked, fontSize, selectedType, selectedSubType, canUndo, canRedo, hasSelection, legendPickerColor,
-    cropMode, cropBounds,
+    cropMode, cropBounds, hasCrop, isLegendSelected,
     changeTool, setColorModeAction, toggleColorMode, changeColor, clearFill, clearStroke,
     changeOpacity, changeStrokeWidth, changeFontSize,
     copySelected, pasteSelected, duplicateSelected,
     placeLegendShape,
     undo, redo, deleteSelected, downloadImage, saveEditable, createLegend, removeLegendColor,
-    confirmCrop, cancelCrop, updateCropBounds, resetPhoto,
+    confirmCrop, cancelCrop, updateCropBounds, revertCrop, resetPhoto,
     fabricRef,
   }
 }

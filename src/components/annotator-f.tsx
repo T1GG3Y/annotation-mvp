@@ -7,9 +7,9 @@ import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@
 import { CropOverlay } from '@/components/crop-overlay'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
-interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void }
+interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void; hiddenTools?: Tool[] }
 
-const TOOLS: { tool: Tool; Icon: typeof MousePointer2 }[] = [
+const ALL_TOOLS: { tool: Tool; Icon: typeof MousePointer2 }[] = [
   { tool: 'circle', Icon: Circle },
   { tool: 'rectangle', Icon: Square },
   { tool: 'arrow', Icon: ArrowUpRight },
@@ -36,10 +36,12 @@ function NoColorIcon() {
   )
 }
 
-export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }: Props) {
+export default function AnnotatorF({ imageUrl, imageName, initialState, onBack, hiddenTools }: Props) {
   const canvasElRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const a = useAnnotator({ imageUrl, imageName, initialState, canvasElRef, containerRef })
+
+  const TOOLS = ALL_TOOLS.filter(t => !(hiddenTools ?? []).includes(t.tool))
 
   const [viewportHeight, setViewportHeight] = useState<number | null>(null)
   useEffect(() => {
@@ -223,6 +225,8 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
             onBoundsChange={a.updateCropBounds}
             onConfirm={a.confirmCrop}
             onCancel={a.cancelCrop}
+            hasCrop={a.hasCrop}
+            onRevertCrop={a.revertCrop}
           />
         )}
       </div>
@@ -241,31 +245,45 @@ export default function AnnotatorF({ imageUrl, imageName, initialState, onBack }
           ))}
         </div>
 
-        {/* Row 2: Mode toggle + color swatches + null */}
-        <div className="flex items-center gap-1 px-2 border-b border-zinc-800/60" style={{ height: 52 }}>
-          {/* Stroke/Fill toggle — hidden for lines (always stroke) */}
-          {!isLine && (
-            <button onClick={toggleColorMode}
-              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-colors ${isFillMode ? 'bg-zinc-600 text-white' : 'text-zinc-500 active:bg-zinc-800'}`}>
-              {isFillMode ? <PaintBucket size={18} /> : <Pen size={18} />}
-            </button>
-          )}
-          <div className="flex flex-1 items-center justify-around">
-            {COLORS.map(({ value, label }) => (
-              <button key={value} onClick={() => a.changeColor(value)} title={label}
-                className={`w-8 h-8 rounded-full border-2 transition-all ${!nullSelected && activeSelectedColor === value ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
-                style={{ backgroundColor: value }} />
-            ))}
-            {!isTextMode && (
-              <button
-                onClick={isStrokeMode ? a.clearStroke : a.clearFill}
-                className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${nullSelected ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
-                style={{ backgroundColor: '#27272a' }}>
-                <NoColorIcon />
+        {/* Row 2: Legend font size (when legend selected) OR color swatches */}
+        {a.isLegendSelected ? (
+          <div className="flex items-center gap-2 px-3 border-b border-zinc-800/60" style={{ height: 52 }}>
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wide shrink-0 w-16">Legend Size</span>
+            <div className="flex flex-1 items-center gap-2">
+              <button onClick={() => a.changeFontSize(-1)} className="flex-1 h-9 rounded-lg flex items-center justify-center text-zinc-300 active:bg-zinc-800">
+                <AArrowDown size={18} />
+              </button>
+              <button onClick={() => a.changeFontSize(1)} className="flex-1 h-9 rounded-lg flex items-center justify-center text-zinc-300 active:bg-zinc-800">
+                <AArrowUp size={18} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 px-2 border-b border-zinc-800/60" style={{ height: 52 }}>
+            {/* Stroke/Fill toggle — hidden for lines (always stroke) */}
+            {!isLine && (
+              <button onClick={toggleColorMode}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-colors ${isFillMode ? 'bg-zinc-600 text-white' : 'text-zinc-500 active:bg-zinc-800'}`}>
+                {isFillMode ? <PaintBucket size={18} /> : <Pen size={18} />}
               </button>
             )}
+            <div className="flex flex-1 items-center justify-around">
+              {COLORS.map(({ value, label }) => (
+                <button key={value} onClick={() => a.changeColor(value)} title={label}
+                  className={`w-8 h-8 rounded-full border-2 transition-all ${!nullSelected && activeSelectedColor === value ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
+                  style={{ backgroundColor: value }} />
+              ))}
+              {!isTextMode && (
+                <button
+                  onClick={isStrokeMode ? a.clearStroke : a.clearFill}
+                  className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${nullSelected ? 'border-blue-400 scale-110' : 'border-zinc-600 active:scale-105'}`}
+                  style={{ backgroundColor: '#27272a' }}>
+                  <NoColorIcon />
+                </button>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Context row: Stroke width (shapes/lines) */}
         {a.selectedType === 'shape' && (
