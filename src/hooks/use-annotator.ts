@@ -644,16 +644,21 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
   const confirmCrop = useCallback(() => {
     const c = fabricRef.current; if (!c || !cropModeRef.current) return
     const b = cropBoundsRef.current
-    // Save snapshot BEFORE crop so revert can restore it
-    preCropSnapshotRef.current = JSON.stringify((c as any).toJSON(CUSTOM_PROPS))
+    // Save snapshot only before the FIRST crop so revert undoes all crops
+    if (!preCropSnapshotRef.current) {
+      preCropSnapshotRef.current = JSON.stringify((c as any).toJSON(CUSTOM_PROPS))
+    }
     cropModeRef.current = false; setCropMode(false)
     if (b.width > 20 && b.height > 20) {
-      applyCrop(c, b.left, b.top, b.width, b.height, () => { setHasCrop(true); saveHistory() })
-    } else {
-      saveHistory()
+      applyCrop(c, b.left, b.top, b.width, b.height, () => {
+        setHasCrop(true); saveHistory()
+        // Re-enter crop mode with bounds reset to the new image
+        changeTool('crop')
+      })
     }
-    applySelectMode(c, setActiveTool, activeToolRef)
-  }, [saveHistory])
+    // If crop region too small, stay in crop mode (bounds unchanged)
+    else { cropModeRef.current = true; setCropMode(true) }
+  }, [saveHistory, changeTool])
 
   const cancelCrop = useCallback(() => {
     const c = fabricRef.current; if (!c) return
@@ -1177,17 +1182,29 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
 
         // First click after text editing exits: keep textbox selected, don't create a new one
         if (tool === 'text' && textJustDoneRef.current) {
-          textJustDoneRef.current = null; return
+          const t = textJustDoneRef.current; textJustDoneRef.current = null
+          // Fabric will clear selection from this click — re-select after it finishes
+          setTimeout(() => { if (fabricRef.current) { fabricRef.current.setActiveObject(t); fabricRef.current.renderAll() } }, 0)
+          return
         }
 
-        // If the user clicks the just-drawn shape, let Fabric handle move/resize
-        if (justCreatedRef.current && opt.target === justCreatedRef.current) return
+        // If the user clicks the just-drawn shape (or any part of its callout group), let Fabric handle
+        if (justCreatedRef.current) {
+          const jcCalloutId = (justCreatedRef.current as any)?._calloutId
+          const targetCalloutId = (opt.target as any)?._calloutId
+          if (opt.target === justCreatedRef.current) return
+          if (jcCalloutId && targetCalloutId && jcCalloutId === targetCalloutId) return
+        }
 
         // Any other click: clear just-created and begin drawing
         justCreatedRef.current = null
         canvas.discardActiveObject()
         ;(canvas as any).skipTargetFind = true
         canvas.selection = false
+
+        // Reset opacity to 100% for every new shape
+        setStrokeOpacity(1); strokeOpacityRef.current = 1
+        setFillOpacity(1); fillOpacityRef.current = 1
 
         const pointer = getPointer(canvas, opt)
 
@@ -1236,7 +1253,10 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           canvas.add(anchor)
           anchor.visible = true
           canvas.setActiveObject(bubble)
-          applySelectMode(canvas, setActiveTool, activeToolRef)
+          justCreatedRef.current = bubble
+          // Keep callout tool selected; allow immediate interaction with just-placed callout
+          canvas.selection = true; (canvas as any).skipTargetFind = false
+          canvas.defaultCursor = 'crosshair'
           canvas.renderAll(); saveHistory(); return
         }
 

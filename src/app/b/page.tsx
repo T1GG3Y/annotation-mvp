@@ -24,6 +24,6 @@ export default function PageB() {
     setImageUrl(null); setImageName(''); setCanvasState(null)
   }, [imageUrl])
 
-  if (imageUrl) return <Annotator imageUrl={imageUrl} imageName={imageName} initialState={canvasState} onBack={handleBack} hiddenTools={['crop', 'callout']} />
+  if (imageUrl) return <Annotator imageUrl={imageUrl} imageName={imageName} initialState={canvasState} onBack={handleBack} hiddenTools={['crop', 'callout']} showToolLabels />
   return <UploadScreen onFile={handleFile} versionLabel="Desktop Prototype B" />
 }

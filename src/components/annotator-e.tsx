@@ -7,7 +7,7 @@ import { useAnnotator, COLORS, STROKE_WIDTHS, STROKE_LABELS, type Tool } from '@
 import { CropOverlay } from '@/components/crop-overlay'
 import { applyDamageVisibility } from '@/lib/image-enhance'
 
-interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void; hiddenTools?: Tool[] }
+interface Props { imageUrl: string; imageName: string; initialState?: string | null; onBack: () => void; hiddenTools?: Tool[]; showToolLabels?: boolean }
 
 const ALL_TOOL_GRID: { tool: Tool; Icon: typeof MousePointer2; label: string; key: string }[][] = [
   [
@@ -44,14 +44,22 @@ function NoColorIcon() {
   )
 }
 
-export default function AnnotatorE({ imageUrl, imageName, initialState, onBack, hiddenTools }: Props) {
+export default function AnnotatorE({ imageUrl, imageName, initialState, onBack, hiddenTools, showToolLabels }: Props) {
   const canvasElRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const a = useAnnotator({ imageUrl, imageName, initialState, canvasElRef, containerRef })
 
-  const TOOL_GRID = ALL_TOOL_GRID
+  // Filter hidden tools, then merge any consecutive single-item rows into pairs
+  const filteredRows = ALL_TOOL_GRID
     .map(row => row.filter(t => !(hiddenTools ?? []).includes(t.tool)))
     .filter(row => row.length > 0)
+  const TOOL_GRID: typeof ALL_TOOL_GRID = []
+  let _ri = 0
+  while (_ri < filteredRows.length) {
+    if (filteredRows[_ri].length === 1 && filteredRows[_ri + 1]?.length === 1) {
+      TOOL_GRID.push([filteredRows[_ri][0], filteredRows[_ri + 1][0]]); _ri += 2
+    } else { TOOL_GRID.push(filteredRows[_ri]); _ri++ }
+  }
 
   const [damageVisibility, setDamageVisibility] = useState(0)
   const originalImgRef = useRef<HTMLImageElement | null>(null)
@@ -126,11 +134,14 @@ export default function AnnotatorE({ imageUrl, imageName, initialState, onBack, 
         <div className="px-3 flex flex-col gap-1">
           {TOOL_GRID.map((row, ri) => (
             <div key={ri} className="grid grid-cols-2 gap-1">
-              {row.map(({ tool, Icon, key }) => (
+              {row.map(({ tool, Icon, label, key }) => (
                 <button key={tool} onClick={() => a.changeTool(tool)}
                   className={`flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors ${a.activeTool === tool ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'}`}>
                   <Icon size={16} />
-                  {key && <span className={`text-[10px] font-mono ${a.activeTool === tool ? 'text-blue-200' : 'text-zinc-600'}`}>{key}</span>}
+                  {showToolLabels
+                    ? <span className="text-xs">{label}</span>
+                    : key && <span className={`text-[10px] font-mono ${a.activeTool === tool ? 'text-blue-200' : 'text-zinc-600'}`}>{key}</span>
+                  }
                 </button>
               ))}
             </div>
