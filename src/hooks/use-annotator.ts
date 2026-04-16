@@ -1196,6 +1196,9 @@ export function useAnnotator({ imageUrl, imageName, initialState, canvasElRef, c
           if (jcCalloutId && targetCalloutId && jcCalloutId === targetCalloutId) return
         }
 
+        // Text tool: clicking on an existing text object lets Fabric handle drag/resize/double-click-to-edit
+        if (tool === 'text' && opt.target && (opt.target.type === 'i-text' || opt.target.type === 'textbox')) return
+
         // Any other click: clear just-created and begin drawing
         justCreatedRef.current = null
         canvas.discardActiveObject()
